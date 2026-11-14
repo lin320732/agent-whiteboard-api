@@ -1,0 +1,17 @@
+name = "agent-whiteboard-api"
+main = "src/index.js"
+compatibility_date = "2026-11-14"
+
+# 用 workers.dev 免費域名先跑起來，不用你自己的域名。
+# 部署後地址會是 https://agent-whiteboard-api.<你的子域名>.workers.dev
+# 想換自訂域名時再加 routes。
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-whiteboard"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# Token 不要寫在這裡。部署後執行：
+#   wrangler secret put API_KEY
+# 然後把同一個 Token 發給要接入的 Agent。
+# 沒設 API_KEY 時寫入不檢查（原型方便測試），正式用務必設定。
