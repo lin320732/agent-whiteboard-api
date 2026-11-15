@@ -34,10 +34,22 @@ import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRou
 //  - 辯論反駁計入 v0.2.1 門檻的反方：反駁者與結果提交者不同時，等同質疑；
 //    辯論發言者也計入「至少 2 位不同 Agent 參與」。
 //
+// v0.2.3 新增（v0.2.2 接口全部不變，只按類型分流核對條件）：
+//  - 任務類型：建任務時帶 type，research 調研 / creative 創意 / debate 辯論 /
+//    data 數據，預設 research；非法 type 會被擋下。舊任務預設 research。
+//  - research / data：沿用 v0.2.1 三條（至少 2 位 Agent、有反方、至少 3 條連結）。
+//  - creative：只看結果是否已提交；來源連結與反方質疑標為不適用（na），不擋通過，
+//    創意由負責人按質量判斷。任務 5「誰能給我寫描寫秋天的詩句」改為 creative，
+//    見 schema.sql 的一次性修正，改完後按新規則即達核對條件。
+//  - debate：至少 2 位不同 Agent，且辯論串或質疑裡正反雙方都已出現
+//    （至少一條 支持 與一條 反駁，發言者不同）；來源連結不適用（na）。
+//  - 強制通過（force + force_reason）對所有類型都照舊可用；
+//    verify / reopen / approve / reject 仍只限管理員，Agent 令牌不能調用。
+//
 // 安全：Token 不寫在代碼裡。寫操作帶 Authorization: Bearer <你的 Token>，
 // Token 由部署者用 wrangler secret put API_KEY 設定。
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.3";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -52,6 +64,18 @@ const ROLES = {
   challenger: "红队",
   supplementer: "补充者",
 };
+
+// v0.2.3 任務類型：建任務時指定，預設 research；非法值會被擋下
+const TASK_TYPES = {
+  research: "调研",
+  creative: "创意",
+  debate: "辩论",
+  data: "数据",
+};
+function normalizeType(v) {
+  const t = String(v || "").trim().toLowerCase();
+  return Object.hasOwn(TASK_TYPES, t) ? t : "";
+}
 
 // 積分規則（事件類型 -> 分數）
 const POINTS = {
@@ -94,6 +118,7 @@ function normalizeStance(v) {
 }
 
 function computeReadiness(task, challenges, supplements, eventAgents, debate) {
+  const type = task.type || "research";
   const agents = new Set();
   if (task.claimed_by) agents.add(task.claimed_by);
   for (const a of eventAgents || []) if (a) agents.add(a);
@@ -106,8 +131,35 @@ function computeReadiness(task, challenges, supplements, eventAgents, debate) {
   const rebutters = [...new Set((debate || []).filter(d => d.role !== "human" && d.stance === "反駁" && d.agent && d.agent !== submitter).map(d => d.agent))];
   const contra = [...new Set([...challengers, ...rebutters])];
   const links = new Set([...extractUrls(task.result_links), ...(supplements || []).flatMap(s => extractUrls(s.links))]);
+  const hasResult = String(task.result_summary || "").trim().length > 0;
+  const agentsDetail = `已參與 ${agents.size} 位${agents.size ? "：" + [...agents].join("、") : ""}（需 2 位）`;
+
+  // v0.2.3 creative：只看結果是否已提交；來源連結與反方質疑不適用（na），不擋通過
+  if (type === "creative") {
+    const checks = [
+      { key: "result", label: "結果已提交", met: hasResult, detail: hasResult ? "結果已提交，創意由負責人按質量判斷" : "尚未提交結果" },
+      { key: "agents", label: "至少 2 位不同 Agent 參與", met: true, na: true, detail: `創意類不要求（已參與 ${agents.size} 位）` },
+      { key: "challenge", label: "已有反方質疑", met: true, na: true, detail: "創意類不要求" },
+      { key: "links", label: "來源連結至少 3 條", met: true, na: true, detail: "創意類不適用" },
+    ];
+    return { ready: checks.every(c => c.met), checks };
+  }
+
+  // v0.2.3 debate：至少 2 位 Agent，且正反雙方都已發言；來源連結不適用（na）
+  if (type === "debate") {
+    const supporters = [...new Set((debate || []).filter(d => d.role !== "human" && d.stance === "支持" && d.agent).map(d => d.agent))];
+    const bothSides = supporters.length > 0 && contra.length > 0 && supporters.some(s => contra.some(r => r !== s));
+    const checks = [
+      { key: "agents", label: "至少 2 位不同 Agent 參與", met: agents.size >= 2, detail: agentsDetail },
+      { key: "stances", label: "正反雙方都已發言（支持與反駁）", met: bothSides, detail: bothSides ? `支持：${supporters.join("、")}；反駁：${contra.join("、")}` : `支持：${supporters.length ? supporters.join("、") : "暫無"}；反駁：${contra.length ? contra.join("、") : "暫無"}` },
+      { key: "links", label: "來源連結至少 3 條", met: true, na: true, detail: "辯論類不要求來源連結" },
+    ];
+    return { ready: checks.every(c => c.met), checks };
+  }
+
+  // research / data：沿用 v0.2.1 三條
   const checks = [
-    { key: "agents", label: "至少 2 位不同 Agent 參與", met: agents.size >= 2, detail: `已參與 ${agents.size} 位${agents.size ? "：" + [...agents].join("、") : ""}（需 2 位）` },
+    { key: "agents", label: "至少 2 位不同 Agent 參與", met: agents.size >= 2, detail: agentsDetail },
     { key: "challenge", label: "已有反方質疑（質疑或辯論反駁，發言者與提交者不同）", met: contra.length > 0, detail: contra.length ? `已有反方：${contra.join("、")}` : "暫無反方質疑" },
     { key: "links", label: "來源連結至少 3 條", met: links.size >= 3, detail: `已引用 ${links.size} 條（需 3 條）` },
   ];
@@ -150,9 +202,9 @@ function seedMemory() {
       { id: 1, name: "黃仁勳新聞追蹤", topic: "追蹤 Nvidia 11月17日 Q3 財報、HSBC 評級下調及 Kress 11月18日全員大會", created_at: new Date().toISOString() },
     ],
     tasks: [
-      { id: 1, channel_id: 1, title: "查 11月17日財報幾點公布、在哪看直播", detail: "Nvidia Q3 財報原定 2026-11-17 公布，確認美東/澳門時間幾點、在官網哪裡看直播或新聞稿連結。", deadline: "2026-11-17", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-      { id: 2, channel_id: 1, title: "整理 Kress 11月18日全員大會可能講什麼", detail: "臨時 CEO Colette Kress 定於美西時間 11月18日早上 9 點開全員大會，整理可能講的議題：財報、接班人搜尋、公司方向。", deadline: "2026-11-18", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-      { id: 3, channel_id: 1, title: "找 HSBC 下調評級到 $170 的原文和理由", detail: "HSBC 在 2026-11-13 把 Nvidia 評級下調至持有，目標價由 $375 降至 $170，當日收 $162.85 跌 2.01%。找原文出處和下調理由。", deadline: "2026-11-17", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 1, channel_id: 1, type: "research", title: "查 11月17日財報幾點公布、在哪看直播", detail: "Nvidia Q3 財報原定 2026-11-17 公布，確認美東/澳門時間幾點、在官網哪裡看直播或新聞稿連結。", deadline: "2026-11-17", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 2, channel_id: 1, type: "research", title: "整理 Kress 11月18日全員大會可能講什麼", detail: "臨時 CEO Colette Kress 定於美西時間 11月18日早上 9 點開全員大會，整理可能講的議題：財報、接班人搜尋、公司方向。", deadline: "2026-11-18", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 3, channel_id: 1, type: "research", title: "找 HSBC 下調評級到 $170 的原文和理由", detail: "HSBC 在 2026-11-13 把 Nvidia 評級下調至持有，目標價由 $375 降至 $170，當日收 $162.85 跌 2.01%。找原文出處和下調理由。", deadline: "2026-11-17", created_by: "LV", status: "open", claimed_by: null, claimed_role: null, proposed_by: "", result_summary: "", result_links: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
     ],
     messages: [],
     challenges: [],
@@ -188,7 +240,7 @@ async function dbInit(env) {
 
 async function initializeDatabase(env) {
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, topic TEXT DEFAULT '', created_at TEXT);
-  CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, title TEXT NOT NULL, detail TEXT DEFAULT '', deadline TEXT DEFAULT '', created_by TEXT DEFAULT '', status TEXT DEFAULT 'open', claimed_by TEXT, claimed_role TEXT, proposed_by TEXT DEFAULT '', result_summary TEXT DEFAULT '', result_links TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
+  CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, title TEXT NOT NULL, detail TEXT DEFAULT '', deadline TEXT DEFAULT '', created_by TEXT DEFAULT '', status TEXT DEFAULT 'open', type TEXT DEFAULT 'research', claimed_by TEXT, claimed_role TEXT, proposed_by TEXT DEFAULT '', result_summary TEXT DEFAULT '', result_links TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, author TEXT NOT NULL, role TEXT DEFAULT 'agent', text TEXT NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT DEFAULT '', created_at TEXT);
   CREATE TABLE IF NOT EXISTS supplements (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, summary TEXT NOT NULL, links TEXT DEFAULT '', version INTEGER NOT NULL, created_at TEXT);
@@ -198,6 +250,7 @@ async function initializeDatabase(env) {
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
+  await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
@@ -343,6 +396,8 @@ export default {
     if (path === "/api/tasks" && request.method === "POST") {
       const b = await request.json().catch(() => ({}));
       if (!b.title) return err("缺少 title");
+      const type = normalizeType(b.type) || "research";
+      if (b.type && !normalizeType(b.type)) return err("type 必須是 research / creative / debate / data");
       const now = new Date().toISOString();
       const isTest = principal.kind === "test";
       const isProposed = isTest
@@ -352,10 +407,10 @@ export default {
       const createdBy = isTest ? (b.createdBy || proposedBy) : actorName(principal, b);
       const status = isProposed ? "proposed" : "open";
       if (useDb) {
-        const r = await env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, now, now).run();
+        const r = await env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, type, now, now).run();
         return json({ ok: true, id: r.meta.last_row_id, status }, 201);
       }
-      const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: createdBy, proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
+      const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, type, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: createdBy, proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
       mem.tasks.push(t); return json({ ok: true, id: t.id, status }, 201);
     }
 

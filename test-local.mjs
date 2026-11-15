@@ -1,4 +1,4 @@
-// 本地測試 v0.2.2：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
+// 本地測試 v0.2.3：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
 // node test-local.mjs
 import worker from "./src/index.js";
 
@@ -20,7 +20,7 @@ function assert(c, msg) { if (!c) { console.error("FAIL:", msg); process.exit(1)
 
 // --- v0.1 回歸：健康檢查、種子任務、認領、交結果、核對、討論 ---
 const h = await call("GET", "/");
-assert(h.data.ok && h.data.version === "0.2.2", "health 版本 0.2.2");
+assert(h.data.ok && h.data.version === "0.2.3", "health 版本 0.2.3");
 assert(h.data.endpoints.some(e => e.includes("challenge")), "health 列出 challenge 接口");
 assert(h.data.endpoints.some(e => e.includes("debate")), "health 列出 debate 接口");
 assert(h.data.endpoints.some(e => e.includes("leaderboard")), "health 列出 leaderboard 接口");
@@ -252,5 +252,68 @@ assert(verifyDebate.data.task.status === "done", "辯論湊滿門檻後核對通
 const supListDebate = await call("GET", `/api/tasks/${dtid}/supplements`);
 assert(supListDebate.data.supplements.length === 1, "辯論沒有產生補充版本（仍只有 1 個補充）");
 assert(!readyDebate2.data.task.result_summary.includes("兩邊說法各對一半"), "辯論內容沒有混進結果正文");
+
+// --- v0.2.3 任務類型 ---
+// 預設 research；非法 type 被擋下
+const defType = await call("POST", "/api/tasks", { title: "預設類型任務", channelId: 1, createdBy: "LV" });
+assert(defType.data.status === "open", "預設類型任務建立成功");
+const defTask = await call("GET", `/api/tasks/${defType.data.id}`);
+assert(defTask.data.task.type === "research", "沒填 type 預設 research");
+const badType = await call("POST", "/api/tasks", { title: "非法類型任務", channelId: 1, createdBy: "LV", type: "essay" });
+assert(badType.res.status === 400, "非法 type 被擋下");
+
+// research：單一 Agent + 0 連結未達標（與 v0.2.1 任務 2 同規則）
+const resTask = await call("POST", "/api/tasks", { title: "調研類型任務", channelId: 1, createdBy: "LV", type: "research" });
+const rid = resTask.data.id;
+assert((await call("GET", `/api/tasks/${rid}`)).data.task.type === "research", "調研任務 type 正確");
+await call("POST", `/api/tasks/${rid}/claim`, { agent: "Agent R", role: "researcher" });
+await call("POST", `/api/tasks/${rid}/result`, { summary: "調研結論", links: [] });
+const readyR = await call("GET", `/api/tasks/${rid}`);
+assert(readyR.data.verify_readiness.ready === false, "調研類單一 Agent 未達標");
+
+// creative：1 位 Agent、0 連結、0 質疑，交結果即達標（任務 5 的情形）
+const creTask = await call("POST", "/api/tasks", { title: "寫秋天的詩句", detail: "盡可能多提供描寫秋天的詩句", channelId: 1, createdBy: "LV", type: "creative" });
+const cid = creTask.data.id;
+const creOpen = await call("GET", `/api/tasks/${cid}`);
+assert(creOpen.data.verify_readiness.ready === false, "創意類沒交結果前未達標");
+assert(creOpen.data.verify_readiness.checks.find(c => c.key === "result").met === false, "創意類結果檢查未滿足");
+await call("POST", `/api/tasks/${cid}/claim`, { agent: "Agent P", role: "researcher" });
+await call("POST", `/api/tasks/${cid}/result`, { summary: "杜牧《山行》：停車坐愛楓林晚，霜葉紅於二月花。", links: [] });
+const readyC = await call("GET", `/api/tasks/${cid}`);
+assert(readyC.data.verify_readiness.ready === true, "創意類 1 位 Agent、0 連結，交結果即達標");
+assert(readyC.data.verify_readiness.checks.find(c => c.key === "links").na === true, "創意類連結顯示不適用");
+assert(readyC.data.verify_readiness.checks.find(c => c.key === "challenge").na === true, "創意類質疑顯示不要求");
+const verifyC = await call("POST", `/api/tasks/${cid}/verify`, {});
+assert(verifyC.data.task.status === "done", "創意類核對通過");
+
+// debate：只有支持不夠，正反雙方都發言才達標
+const debTask = await call("POST", "/api/tasks", { title: "辯論類型任務", detail: "AI 是否會取代程式員", channelId: 1, createdBy: "LV", type: "debate" });
+const did = debTask.data.id;
+await call("POST", `/api/tasks/${did}/claim`, { agent: "Agent G", role: "researcher" });
+await call("POST", `/api/tasks/${did}/result`, { summary: "初步結論：短期不會", links: [] });
+await call("POST", `/api/tasks/${did}/debate`, { agent: "Agent G", stance: "支持", content: "我同意，創意工作難替代" });
+const readyD1 = await call("GET", `/api/tasks/${did}`);
+assert(readyD1.data.verify_readiness.ready === false, "辯論類只有支持未達標");
+assert(readyD1.data.verify_readiness.checks.find(c => c.key === "stances").met === false, "正反雙方檢查未滿足");
+assert(readyD1.data.verify_readiness.checks.find(c => c.key === "links").na === true, "辯論類連結顯示不適用");
+await call("POST", `/api/tasks/${did}/debate`, { agent: "Agent H", stance: "反駁", content: "重複性編碼正在被替代", links: ["https://example.com/h1"] });
+const readyD2 = await call("GET", `/api/tasks/${did}`);
+assert(readyD2.data.verify_readiness.ready === true, "辯論類正反雙方到場即達標");
+const verifyD = await call("POST", `/api/tasks/${did}/verify`, {});
+assert(verifyD.data.task.status === "done", "辯論類核對通過");
+
+// data：與 research 同規則，單一 Agent 擋下，補齊後通過
+const dataTask = await call("POST", "/api/tasks", { title: "數據類型任務", channelId: 1, createdBy: "LV", type: "data" });
+const daid = dataTask.data.id;
+await call("POST", `/api/tasks/${daid}/claim`, { agent: "Agent S", role: "researcher" });
+await call("POST", `/api/tasks/${daid}/result`, { summary: "數據已整理", links: ["https://example.com/s1"] });
+const readyS = await call("GET", `/api/tasks/${daid}`);
+assert(readyS.data.verify_readiness.ready === false, "數據類單一 Agent 未達標");
+await call("POST", `/api/tasks/${daid}/challenge`, { agent: "Agent T", reason: "缺第二來源", evidence: "https://example.com/t1" });
+await call("POST", `/api/tasks/${daid}/result`, { summary: "數據已整理（補來源）", links: ["https://example.com/s1", "https://example.com/s2", "https://example.com/s3"] });
+const readyS2 = await call("GET", `/api/tasks/${daid}`);
+assert(readyS2.data.verify_readiness.ready === true, "數據類補齊 2 位 Agent + 反方 + 3 連結達標");
+const verifyS = await call("POST", `/api/tasks/${daid}/verify`, {});
+assert(verifyS.data.task.status === "done", "數據類核對通過");
 
 console.log("\n全部測試通過。");

@@ -1,15 +1,18 @@
--- D1 建表（v0.2.2 辯論；wrangler 會在第一次請求時自動建，手工建也可以）：
+-- D1 建表（v0.2.3 任務類型；wrangler 會在第一次請求時自動建，手工建也可以）：
 -- wrangler d1 execute agent-whiteboard --file=./schema.sql
 --
--- 已有庫升級（v0.1/v0.2/v0.2.1 -> v0.2.2）：放心直接跑這個文件，不會丟數據、不會刪表。
+-- 已有庫升級（v0.1/v0.2/v0.2.1/v0.2.2 -> v0.2.3）：放心直接跑這個文件，不會丟數據、不會刪表。
 --  - 全部 CREATE 都帶 IF NOT EXISTS，已有的表不會被重建，裡面的任務/頻道/討論都在。
---  - tasks 表的兩個新欄位（claimed_role、proposed_by）用 ALTER 追加，放在文件最後；
+--  - tasks 表的新欄位（claimed_role、proposed_by、type）用 ALTER 追加，放在文件最後；
 --    如果 Worker 第一次請求時已經自動遷移過，ALTER 會報 "duplicate column name"，
 --    那是預期的，可以忽略，CREATE 的部分在它之前已經執行完了。
 --  - v0.2.1 只新增一張 force_approvals 表（強制通過的理由記錄），不改任何現有表；
 --    已完成的任務保持 done，門檻只攔新的核對通過。
 --  - v0.2.2 只新增一張 debate_messages 表（任務辯論訊息），不改任何現有表；
 --    辯論不產生結果版本，不影響積分榜與核對狀態。
+--  - v0.2.3 只給 tasks 加一個 type 欄位（research / creative / debate / data，
+--    預設 research），並把任務 5 改為 creative；不改任何現有表、不動任務內容。
+--    舊任務全部預設 research，核對條件不變。
 --  - status 現在可以是 open / in_progress / review / done / proposed / closed，
 --    status 欄位本身是 TEXT，沒有 CHECK 約束，所以舊表不用改。
 CREATE TABLE IF NOT EXISTS channels (
@@ -26,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   deadline TEXT DEFAULT '',
   created_by TEXT DEFAULT '',
   status TEXT DEFAULT 'open',
+  type TEXT DEFAULT 'research',
   claimed_by TEXT,
   claimed_role TEXT,
   proposed_by TEXT DEFAULT '',
@@ -113,3 +117,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 -- 旧版 tasks 缺字段时由 Worker dbInit 单独 ALTER；本文件可重复执行。
+-- v0.2.3：tasks 加 type 欄位（已有庫才需要這行；新庫建表時已有）。
+ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';
+
+-- v0.2.3 一次性數據修正（冪等，可重複跑）：任務 5「誰能給我寫描寫秋天的詩句」
+-- 改為創意類。創意類不要求來源連結與反方質疑，交結果即達核對條件，
+-- 跑完 schema.sql 並部署 v0.2.3 後，任務 5 可直接在管理台核對通過。
+-- 只改 id=5 且尚未改過的任務；已是 creative 的不會再動。
+UPDATE tasks SET type='creative' WHERE id=5 AND (type IS NULL OR type='research');
