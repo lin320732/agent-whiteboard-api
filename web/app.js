@@ -87,7 +87,9 @@ function showLogin() {
   visible("workspace", false);
   visible("identity", false);
   visible("loginView", true);
-  clear($("issuedSecrets"));
+  const issued = clear($("issuedSecrets"));
+  issued.hidden = true;
+  delete issued.dataset.accountId;
 }
 function showBoard(user) {
   state.user = user;
@@ -179,7 +181,7 @@ async function refresh() {
     if (state.tasks.some(t => t.id === state.selected)) await selectTask(state.selected);
     else { state.selected = null; clear($("taskDetail")).textContent = "选择一条任务查看详情与操作。"; }
   }
-  if (state.user?.role === "admin") await refreshAccounts();
+  if (state.user?.role === "admin" && !document.querySelector(".account-confirm")) await refreshAccounts();
 }
 async function act(id, action, body = {}) {
   await api(`/api/tasks/${id}/${action}`, "POST", body);
@@ -296,31 +298,52 @@ function showSecrets(account) {
   for (const [key, label] of [["password", "控制台登录密码"], ["muse_token", "Muse 个人发布令牌"], ["token", "Agent API 令牌"]]) {
     if (account[key]) add(target, node("pre", `${label}：${account[key]}`));
   }
+  target.dataset.accountId = String(account.id);
   target.hidden = false;
+  target.scrollIntoView({ block: "center" });
+}
+function confirmAccountAction(item, message, label, onConfirm, destructive = false) {
+  item.querySelector(".account-confirm")?.remove();
+  const box = node("div", null, "account-confirm");
+  const error = node("p", "", "error");
+  error.setAttribute("role", "alert");
+  const controls = node("div", null, "action-row");
+  add(controls, button(label, async () => {
+    error.textContent = "";
+    try { await onConfirm(); box.remove(); }
+    catch (cause) { error.textContent = cause.message; }
+  }, destructive ? "danger" : "primary"), button("取消", () => box.remove()));
+  add(box, node("p", message), controls, error);
+  item.append(box);
+  box.scrollIntoView({ block: "nearest" });
 }
 async function refreshAccounts() {
   const [users, agents] = await Promise.all([api("/api/admin/users"), api("/api/admin/agents")]);
   for (const [kind, rows, targetId] of [["users", users.accounts, "users"], ["agents", agents.accounts, "agents"]]) {
     const target = clear($(targetId));
     for (const person of rows) {
+      const item = node("div", null, "account-item");
       const row = node("div", null, "account-row");
       const info = node("div");
       add(info, node("strong", `${person.name} · ${roleText[person.role] || person.role}`), node("span", `${person.username}${person.active ? "" : " · 已停用"}`));
       add(row, info);
       if (person.active && person.id !== state.user.id) {
         const controls = node("div", null, "action-row");
-        add(controls, button("轮换", async () => {
-          if (!confirm(`轮换 ${person.name} 的凭据？旧凭据将立即失效。`)) return;
+        add(controls, button("轮换", () => confirmAccountAction(item, `轮换 ${person.name} 的凭据？旧凭据将立即失效。`, "确认轮换", async () => {
           const changed = await api(`/api/admin/${kind}/${person.id}/rotate`, "POST", {});
           showSecrets({ ...changed, name: person.name }); notify("新凭据已签发");
-        }), button("停用", async () => {
-          if (!confirm(`停用 ${person.name}？其会话和令牌将立即失效。`)) return;
+        })), button("停用", () => confirmAccountAction(item, `停用 ${person.name}？其会话和令牌将立即失效。`, "确认停用", async () => {
           await api(`/api/admin/${kind}/${person.id}/revoke`, "POST", {});
-          notify("账号已停用"); await refreshAccounts();
-        }, "danger"));
+          const issued = $("issuedSecrets");
+          if (issued.dataset.accountId === String(person.id)) {
+            clear(issued); issued.hidden = true; delete issued.dataset.accountId;
+          }
+          await refreshAccounts(); notify("账号已停用");
+        }, true), "danger"));
         add(row, controls);
       }
-      add(target, row);
+      add(item, row);
+      add(target, item);
     }
   }
 }
