@@ -44,7 +44,7 @@ node "$CFCM" wrangler a4a41234 -- deploy
 
 ## v0.2.2 + 权限控制 + 独立控制台（2026-11-15 已上线）
 
-- 本目录现已连接 GitHub 的 `origin/main`，在 `feat/whiteboard-console-auth` 分支开发；实际 `wrangler.toml` 保留原 Cloudflare Account ID 与 D1 ID。Secret 原文不进入 Git。
+- 本目录现已连接 GitHub 的 `origin/main`，改动已推送到 `origin/feat/whiteboard-console-auth`；生产 Worker 与该功能分支一致，`main` 保留上游 v0.2.2 供审核后合并。项目本机 Git 凭据只为此仓库选择已授权账号，Token 仍由 Codeg 存在 macOS Keychain，未更改全局默认账号。实际 `wrangler.toml` 保留原 Cloudflare Account ID 与 D1 ID。Secret 原文不进入 Git。
 - API 在 v0.2.2 基础上加入 D1 存储的人类账号与独立 Agent 凭据、管理员会话；旧 `API_KEY` 在过渡期只允许 Agent 操作，不能审批、核对、退回或强制通过。
 - 控制台 Worker 名 `agent-whiteboard-board`，域名 `board.a4a4.ccwu.cc`，通过 Service Binding 访问后端，不开放控制台的 workers.dev 和 Preview URL。
 - 首次上线前已备份原 D1 到本机 `.wrangler/backups/whiteboard-before-022-auth.sql`（0600），然后执行 `migrations/0001-auth.sql`：仅建 `force_approvals`、`debate_messages` 和权限相关新表，不覆盖原任务。线上仍有 5 条任务、1 个频道。
