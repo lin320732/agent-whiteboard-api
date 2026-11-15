@@ -1,6 +1,9 @@
 const $ = id => document.getElementById(id);
 const state = { user: null, channels: [], tasks: [], selected: null, detail: null };
 const statusText = { open: "待认领", in_progress: "进行中", review: "待核对", proposed: "待审批", done: "已完成", closed: "已关闭" };
+const typeText = { research: "调研", creative: "创意", debate: "辩论", data: "数据" };
+const taskType = task => Object.hasOwn(typeText, task.type) ? task.type : "research";
+const typeBadge = task => node("span", typeText[taskType(task)], `badge task-type ${taskType(task)}`);
 const roleText = { admin: "管理员", publisher: "发布者", viewer: "只读成员", agent: "Agent" };
 
 function node(tag, value = "", className = "") {
@@ -92,7 +95,7 @@ function renderTasks() {
     item.type = "button";
     add(item, node("strong", task.title));
     const row = node("div", null, "task-line");
-    add(row, node("span", statusText[task.status] || task.status, `badge ${task.status}`), node("small", task.claimed_by || task.created_by || ""));
+    add(row, node("span", statusText[task.status] || task.status, `badge ${task.status}`), typeBadge(task), node("small", task.claimed_by || task.created_by || ""));
     add(item, row);
     item.addEventListener("click", () => selectTask(task.id));
     add(list, item);
@@ -198,7 +201,7 @@ async function selectTask(id) {
   renderTasks();
   const task = data.task;
   const target = clear($("taskDetail")); target.classList.remove("empty");
-  add(target, node("span", statusText[task.status] || task.status, `badge ${task.status}`), node("h3", task.title));
+  add(target, node("span", statusText[task.status] || task.status, `badge ${task.status}`), typeBadge(task), node("h3", task.title));
   if (task.detail) add(target, node("p", task.detail));
   const meta = node("div", null, "task-meta");
   add(meta, node("span", `发布：${task.created_by || "—"}`), node("span", `认领：${task.claimed_by || "—"}`), node("span", `截止：${task.deadline || "—"}`));
@@ -211,8 +214,8 @@ async function selectTask(id) {
   }
   const readiness = section("核对条件");
   for (const check of data.verify_readiness?.checks || []) {
-    const item = node("div", null, `check ${check.met ? "met" : ""}`);
-    add(item, node("span", check.met ? "✓" : "!", "indicator"), node("span", `${check.label} · ${check.detail}`));
+    const item = node("div", null, `check ${check.na ? "na" : check.met ? "met" : ""}`);
+    add(item, node("span", check.na ? "—" : check.met ? "✓" : "!", "indicator"), node("span", `${check.na ? "不适用 · " : ""}${check.label} · ${check.detail}`));
     add(readiness, item);
   }
   add(target, readiness);
@@ -292,7 +295,7 @@ $("channelFilter").addEventListener("change", () => { state.selected = null; ref
 $("taskForm").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
   try {
-    const result = await api("/api/tasks", "POST", { title: data.title, detail: data.detail, deadline: data.deadline, channelId: Number($("channelFilter").value || state.channels[0]?.id || 1) });
+    const result = await api("/api/tasks", "POST", { title: data.title, detail: data.detail, deadline: data.deadline, type: data.type, channelId: Number($("channelFilter").value || state.channels[0]?.id || 1) });
     form.reset(); notify("任务已发布"); await refresh(); await selectTask(result.id);
   } catch (error) { notify(error.message, true); }
 });
