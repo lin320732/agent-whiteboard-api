@@ -124,6 +124,58 @@ function section(title) {
   add(box, node("h4", title));
   return box;
 }
+function renderTaskConversation(data, onReply = null) {
+  const box = section("任务对话");
+  const thread = node("div", null, "conversation");
+  const debate = data.debate || [];
+  const byId = new Map(debate.filter(item => Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0).map(item => [Number(item.id), item]));
+  const rows = [
+    ...debate.map(item => ({ kind: "debate", item })),
+    ...(data.challenges || []).map(item => ({ kind: "challenge", item })),
+    ...(data.supplements || []).map(item => ({ kind: "supplement", item })),
+  ].map((row, index) => ({ ...row, index, time: Date.parse(row.item.created_at) }));
+  rows.sort((a, b) => (Number.isFinite(a.time) ? a.time : Infinity) - (Number.isFinite(b.time) ? b.time : Infinity) || a.index - b.index);
+  for (const { kind, item, time } of rows) {
+    const message = node("article", null, `conversation-message ${kind}${item.role === "human" ? " human" : ""}`);
+    message.dataset.kind = kind;
+    if (kind === "debate" && Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0) {
+      message.id = `debate-${item.id}`;
+      message.dataset.debateId = String(item.id);
+    }
+    const name = String(item.agent || "未知作者");
+    const avatar = node("span", Array.from(name.trim())[0] || "?", "conversation-avatar");
+    avatar.setAttribute("aria-hidden", "true");
+    const header = node("header", null, "conversation-header");
+    const label = kind === "debate" ? item.stance : kind === "challenge" ? "质疑" : `补充 v${item.version}`;
+    add(header, node("strong", name, "conversation-speaker"), node("span", item.role === "human" ? "成员" : "Agent", "conversation-role"), node("span", label, `conversation-tag ${kind}`));
+    if (Number.isFinite(time)) {
+      const stamp = node("time", new Date(time).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }), "conversation-time");
+      stamp.dateTime = item.created_at;
+      add(header, stamp);
+    }
+    const bubble = node("div", null, "conversation-bubble");
+    if (kind === "debate" && item.reply_to != null && item.reply_to !== "") {
+      const replyId = Number(item.reply_to);
+      const cited = Number.isSafeInteger(replyId) && replyId > 0 ? byId.get(replyId) : null;
+      const quote = node(cited ? "a" : "div", null, "reply-reference");
+      if (cited) {
+        quote.href = `#debate-${replyId}`;
+        add(quote, node("span", `↳ 回复 ${cited.agent || "未知作者"} · #${replyId}`, "reply-target"), node("small", Array.from(String(cited.content || "").trim()).slice(0, 100).join(""), "reply-excerpt"));
+      } else add(quote, node("span", `↳ 回复 #${item.reply_to} · 原发言不可见`, "reply-target"));
+      add(bubble, quote);
+    }
+    const content = kind === "debate" ? item.content : kind === "challenge" ? item.reason : item.summary;
+    add(bubble, linkedText(content));
+    const links = kind === "debate" ? item.links : kind === "challenge" ? item.evidence : item.links;
+    if (links) add(bubble, linkedText(links, "link-list"));
+    if (kind === "debate" && onReply && message.dataset.debateId) add(bubble, button("回复", () => onReply(item), "text-button"));
+    add(message, avatar, header, bubble);
+    add(thread, message);
+  }
+  if (!rows.length) add(thread, node("p", "暂无讨论，欢迎分享观点。", "muted conversation-empty"));
+  add(box, thread);
+  return box;
+}
 function renderChannels() {
   const select = $("channelFilter");
   const value = select.value;
@@ -270,22 +322,10 @@ async function selectTask(id) {
   add(target, readiness);
   const controls = detailActions(task, data.verify_readiness);
   if (controls) add(target, controls);
-  if (data.challenges?.length) {
-    const box = section("质疑");
-    for (const c of data.challenges) add(box, entry(c.agent, `${c.reason}${c.evidence ? `\n证据：${c.evidence}` : ""}`, c.created_at));
-    add(target, box);
-  }
-  if (data.supplements?.length) {
-    const box = section("补充记录");
-    for (const s of data.supplements) add(box, entry(`${s.agent} · v${s.version}`, `${s.summary}${s.links ? `\n来源：${s.links}` : ""}`, s.created_at));
-    add(target, box);
-  }
-  const debates = section("任务辩论");
-  for (const d of data.debate || []) add(debates, entry(`${d.agent} · ${d.stance}${d.reply_to ? ` · 回复 #${d.reply_to}` : ""}`, `${d.content}${d.links ? `\n证据：${d.links}` : ""}`, d.created_at));
-  if (!data.debate?.length) add(debates, node("p", "暂无辩论。", "muted"));
+  const conversation = renderTaskConversation(data);
   const form = debateForm(task, data.debate || []);
-  if (form) add(debates, form);
-  add(target, debates);
+  if (form) add(conversation, form);
+  add(target, conversation);
   if (data.force_approvals?.length) {
     const audits = section("强制通过记录");
     for (const row of data.force_approvals) add(audits, entry(row.agent, row.reason, row.created_at));
