@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import worker from "../src/index.js";
 
 function memoryD1() {
@@ -16,7 +17,7 @@ function memoryD1() {
         async all() { return { results: sqlite.prepare(sql).all(...args) }; },
         async run() {
           const result = sqlite.prepare(sql).run(...args);
-          return { meta: { last_row_id: Number(result.lastInsertRowid) } };
+          return { meta: { last_row_id: Number(result.lastInsertRowid), changes: Number(result.changes) } };
         },
       };
     },
@@ -50,6 +51,17 @@ async function owner(request) {
 }
 
 const boardOrigin = { Origin: "https://board.example.test" };
+
+test("remote migration is additive and can be applied twice", async () => {
+  const { DB } = setup();
+  DB.sqlite.exec("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT)");
+  DB.sqlite.exec("INSERT INTO tasks (id, title) VALUES (42, 'kept')");
+  const migration = readFileSync(new URL("../migrations/0001-auth.sql", import.meta.url), "utf8");
+  DB.sqlite.exec(migration);
+  DB.sqlite.exec(migration);
+  assert.equal(DB.sqlite.prepare("SELECT title FROM tasks WHERE id=42").get().title, "kept");
+  assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM sessions").get().n, 0);
+});
 
 test("private reads, missing D1 and legacy administrative access fail closed", async () => {
   const { request } = setup();
@@ -99,6 +111,30 @@ test("human sessions and per-agent credentials enforce identity and roles", asyn
   const logout = await request("POST", "/api/auth/logout", {}, auth);
   assert.equal(logout.status, 200);
   assert.equal((await request("GET", "/api/tasks", undefined, { Cookie: cookie })).status, 401);
+});
+
+test("malformed role, stance and reserved Agent name cannot corrupt the leaderboard", async () => {
+  const { request } = setup();
+  const legacy = { Authorization: "Bearer old-shared-token" };
+  assert.equal((await request("POST", "/api/tasks/1/claim", { agent: "Red", role: "toString" }, legacy)).status, 400);
+  assert.equal((await request("POST", "/api/tasks/1/debate", { agent: "Red", stance: "toString", content: "reason" }, legacy)).status, 400);
+  try {
+    assert.equal((await request("POST", "/api/tasks/1/claim", { agent: "__proto__" }, legacy)).status, 200);
+    const board = await request("GET", "/api/leaderboard", undefined, legacy);
+    assert.equal(board.data.leaderboard[0].agent, "__proto__");
+    assert.equal(board.data.leaderboard[0].points, 5);
+  } finally { delete Object.prototype.points; }
+});
+
+test("two concurrent claims can record only one winner", async () => {
+  const { request, DB } = setup();
+  const legacy = { Authorization: "Bearer old-shared-token" };
+  const results = await Promise.all([
+    request("POST", "/api/tasks/1/claim", { agent: "Agent A" }, legacy),
+    request("POST", "/api/tasks/1/claim", { agent: "Agent B" }, legacy),
+  ]);
+  assert.deepEqual(results.map(x => x.status).sort(), [200, 400]);
+  assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM events WHERE task_id=1 AND type='claim'").get().n, 1);
 });
 
 test("read-only account cannot write and bootstrap runs once", async () => {

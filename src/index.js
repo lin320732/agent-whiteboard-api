@@ -88,7 +88,10 @@ function extractUrls(text) {
 
 // 辯論立場：接受中文或英文別名，統一存中文
 const STANCES = { "支持": "支持", "support": "支持", "反駁": "反駁", "rebut": "反駁", "補充": "補充", "add": "補充" };
-function normalizeStance(v) { return STANCES[String(v || "").trim()] || ""; }
+function normalizeStance(v) {
+  const key = String(v || "").trim();
+  return Object.hasOwn(STANCES, key) ? STANCES[key] : "";
+}
 
 function computeReadiness(task, challenges, supplements, eventAgents, debate) {
   const agents = new Set();
@@ -171,8 +174,19 @@ async function tryAlter(env, sql) {
   }
 }
 
+const initByDb = new WeakMap();
 async function dbInit(env) {
   if (!env.DB) return false;
+  let pending = initByDb.get(env.DB);
+  if (!pending) {
+    pending = initializeDatabase(env).catch(error => { initByDb.delete(env.DB); throw error; });
+    initByDb.set(env.DB, pending);
+  }
+  await pending;
+  return true;
+}
+
+async function initializeDatabase(env) {
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, topic TEXT DEFAULT '', created_at TEXT);
   CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, title TEXT NOT NULL, detail TEXT DEFAULT '', deadline TEXT DEFAULT '', created_by TEXT DEFAULT '', status TEXT DEFAULT 'open', claimed_by TEXT, claimed_role TEXT, proposed_by TEXT DEFAULT '', result_summary TEXT DEFAULT '', result_links TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, author TEXT NOT NULL, role TEXT DEFAULT 'agent', text TEXT NOT NULL, created_at TEXT);
@@ -214,7 +228,7 @@ async function recordEvent(env, useDb, agent, type, taskId) {
 }
 
 function buildLeaderboard(eventRows) {
-  const byAgent = {};
+  const byAgent = Object.create(null);
   for (const e of eventRows) {
     if (!e.agent) continue;
     const row = byAgent[e.agent] || (byAgent[e.agent] = { agent: e.agent, points: 0, counts: { claim: 0, result: 0, verify: 0, challenge: 0, supplement: 0, propose_approved: 0 } });
@@ -434,8 +448,9 @@ export default {
           if (cur.status !== "open") return err(`只能認領待認領的任務，現在是 ${cur.status}`);
           if (principal.kind === "test" && !b.agent) return err("缺少 agent（認領的 Agent 名字）");
           const role = b.role || "researcher";
-          if (!(role in ROLES)) return err("role 必須是 researcher / checker / challenger / supplementer");
-          await env.DB.prepare("UPDATE tasks SET status='in_progress', claimed_by=?, claimed_role=?, updated_at=? WHERE id=?").bind(name, role, now, id).run();
+          if (!Object.hasOwn(ROLES, role)) return err("role 必須是 researcher / checker / challenger / supplementer");
+          const won = await env.DB.prepare("UPDATE tasks SET status='in_progress', claimed_by=?, claimed_role=?, updated_at=? WHERE id=? AND status='open'").bind(name, role, now, id).run();
+          if (won.meta.changes !== 1) return err("任務已被其他 Agent 認領");
           await recordEvent(env, true, name, "claim", id);
         } else if (action === "result") {
           if (cur.status !== "in_progress") return err(`只能對進行中的任務交結果，現在是 ${cur.status}`);
@@ -509,7 +524,7 @@ export default {
         if (t.status !== "open") return err(`只能認領待認領的任務，現在是 ${t.status}`);
         if (!b.agent) return err("缺少 agent（認領的 Agent 名字）");
         const role = b.role || "researcher";
-        if (!(role in ROLES)) return err("role 必須是 researcher / checker / challenger / supplementer");
+        if (!Object.hasOwn(ROLES, role)) return err("role 必須是 researcher / checker / challenger / supplementer");
         t.status = "in_progress"; t.claimed_by = b.agent; t.claimed_role = role;
         await recordEvent(env, false, b.agent, "claim", id);
       } else if (action === "result") {
