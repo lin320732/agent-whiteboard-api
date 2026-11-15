@@ -46,10 +46,19 @@ import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRou
 //  - 強制通過（force + force_reason）對所有類型都照舊可用；
 //    verify / reopen / approve / reject 仍只限管理員，Agent 令牌不能調用。
 //
+// v0.2.4 新增（v0.2.3 接口全部不變）：
+//  - 連結卡片：GET /api/link-preview?url=<http(s) 連結>，由後端代抓目標頁面，
+//    只取 <title> 與 meta description / og:title / og:description 當純文字回傳
+//    {url, title, description, domain}，絕不回傳原始 HTML 或執行頁面內容。
+//    成功結果快取 1 小時；抓取失敗回 ok:false，讓前端退回普通連結。
+//    只接受公開 http/https 連結，擋下 localhost、私網 IP 段與中繼資料主機
+//    （SSRF 防護；本地測試模式 TEST_MEMORY=1 才放行 127.0.0.1 供測試用）。
+//    抓取限 5 秒、最多跟 3 次重定向、正文上限 512KB。
+//
 // 安全：Token 不寫在代碼裡。寫操作帶 Authorization: Bearer <你的 Token>，
 // Token 由部署者用 wrangler secret put API_KEY 設定。
 
-const VERSION = "0.2.3";
+const VERSION = "0.2.4";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -98,6 +107,148 @@ function isAgentName(name) { return /muse|agent|助手|bot|AI/i.test(name || "")
 function linksToString(v) {
   if (Array.isArray(v)) return v.filter(Boolean).join("\n");
   return v || "";
+}
+
+// ---- v0.2.4 連結卡片 ----
+// 只取標題與描述當純文字，絕不回傳原始 HTML、絕不執行頁面內容。
+// parseLinkPreview 與 previewUrlAllowed 另供本地測試直接驗證。
+function decodeEntities(s) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'", nbsp: " " };
+  return String(s || "").replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, body) => {
+    if (body.startsWith("#x") || body.startsWith("#X")) {
+      const n = parseInt(body.slice(2), 16);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    if (body.startsWith("#")) {
+      const n = parseInt(body.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return Object.hasOwn(named, body) ? named[body] : m;
+  });
+}
+
+function cleanText(s, maxLen) {
+  // 先去標籤、再解實體：否則 &lt; 解成 < 後會被誤當成標籤刪掉
+  const t = decodeEntities(String(s || "").replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+  return t.length > maxLen ? t.slice(0, maxLen - 1).trimEnd() + "…" : t;
+}
+
+export function parseLinkPreview(html, rawUrl) {
+  const text = String(html || "");
+  const metas = {};
+  for (const tag of text.match(/<meta[^>]*>/gi) || []) {
+    const attrs = {};
+    for (const m of tag.matchAll(/([a-zA-Z-]+)\s*=\s*["']([^"']*)["']/g)) attrs[m[1].toLowerCase()] = m[2];
+    const key = (attrs.property || attrs.name || "").toLowerCase();
+    if (key && attrs.content) metas[key] = attrs.content;
+  }
+  const titleMatch = text.match(/<title[^>]*>([\s\S]*?)<\/title\s*>/i);
+  const title = cleanText(metas["og:title"] || (titleMatch ? titleMatch[1] : ""), 120);
+  const description = cleanText(metas["og:description"] || metas.description || "", 200);
+  let domain = "";
+  try { domain = new URL(rawUrl).hostname; } catch { domain = ""; }
+  return { url: rawUrl, title, description, domain };
+}
+
+function isPrivateIp(host) {
+  const h = String(host || "").toLowerCase();
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const n = v4.slice(1).map(Number);
+    if (n.some(x => x > 255)) return true;
+    const [a, b] = n;
+    if (a === 127) return "loopback";
+    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || a === 0) return true;
+    return false;
+  }
+  if (h.includes(":")) {
+    const compact = h.replace(/:/g, "");
+    if (h === "::1") return "loopback";
+    if (/^(fc|fd)/.test(compact) || /^(fe8|fe9|fea|feb)/.test(compact)) return true;
+    return false;
+  }
+  return false;
+}
+
+// SSRF 防護：只放行公開 http/https 連結。allowLoopback 只在本地測試模式
+// （TEST_MEMORY=1）放行 127.0.0.1 / localhost，供測試伺服器使用。
+export function previewUrlAllowed(raw, opts = {}) {
+  let u;
+  try { u = new URL(String(raw || "").trim()); } catch { return { ok: false, error: "連結地址無效" }; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return { ok: false, error: "只支援 http/https 連結" };
+  const host = u.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") {
+    if (opts.allowLoopback && host !== "metadata.google.internal") return { ok: true, url: u.toString() };
+    return { ok: false, error: "不支援內網或本機地址" };
+  }
+  const priv = isPrivateIp(host);
+  if (priv === "loopback") {
+    if (opts.allowLoopback) return { ok: true, url: u.toString() };
+    return { ok: false, error: "不支援內網或本機地址" };
+  }
+  if (priv) return { ok: false, error: "不支援內網或本機地址" };
+  return { ok: true, url: u.toString() };
+}
+
+const PREVIEW_CACHE_TTL_MS = 3600 * 1000;
+const PREVIEW_MAX_BYTES = 512 * 1024;
+const previewCache = new Map();
+
+async function readBodyCapped(res, capBytes) {
+  if (!res.body) return { tooLarge: false, text: "" };
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > capBytes) { try { await reader.cancel(); } catch {} return { tooLarge: true, text: "" }; }
+      chunks.push(value);
+    }
+  } finally { try { reader.releaseLock(); } catch {} }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
+  return { tooLarge: false, text: new TextDecoder("utf-8").decode(merged) };
+}
+
+async function fetchLinkPreview(startUrl, opts = {}) {
+  const key = String(startUrl).split("#")[0];
+  const hit = previewCache.get(key);
+  if (hit && Date.now() - hit.at < PREVIEW_CACHE_TTL_MS) return { ok: true, data: { ...hit.data, cached: true } };
+  let current = startUrl;
+  for (let hop = 0; hop <= 3; hop++) {
+    const checked = previewUrlAllowed(current, opts);
+    if (!checked.ok) return { ok: false, error: checked.error };
+    let res;
+    try {
+      res = await fetch(current, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+        headers: { "User-Agent": "whiteboard-link-preview", Accept: "text/html,application/xhtml+xml" },
+      });
+    } catch (e) {
+      return { ok: false, error: e?.name === "TimeoutError" ? "抓取超時" : "無法連線到該連結" };
+    }
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (!loc) return { ok: false, error: "重定向目標不明" };
+      if (hop === 3) return { ok: false, error: "重定向次數過多" };
+      try { current = new URL(loc, current).toString(); } catch { return { ok: false, error: "重定向地址無效" }; }
+      continue;
+    }
+    if (res.status < 200 || res.status >= 300) return { ok: false, error: `目標回應 HTTP ${res.status}` };
+    const type = (res.headers.get("content-type") || "").toLowerCase();
+    if (type && !type.includes("text/html")) return { ok: false, error: "目標不是網頁" };
+    const body = await readBodyCapped(res, PREVIEW_MAX_BYTES);
+    if (body.tooLarge) return { ok: false, error: "頁面過大" };
+    const data = { ...parseLinkPreview(body.text, current), cached: false };
+    previewCache.set(key, { at: Date.now(), data: { ...data, cached: false } });
+    return { ok: true, data };
+  }
+  return { ok: false, error: "重定向次數過多" };
 }
 
 // ---- v0.2.1 審核門檻 ----
@@ -314,6 +465,7 @@ const ENDPOINTS = [
   "POST /api/tasks/:id/debate", "GET /api/tasks/:id/debate",
   "POST /api/tasks/:id/approve", "POST /api/tasks/:id/reject",
   "GET /api/leaderboard",
+  "GET /api/link-preview?url=https://...",
   "GET /api/messages?channelId=1", "POST /api/messages",
 ];
 
@@ -354,6 +506,18 @@ export default {
         rows = mem.events;
       }
       return json({ ok: true, leaderboard: buildLeaderboard(rows) });
+    }
+
+    // ---- 連結卡片（v0.2.4）：後端代抓目標頁面標題與描述 ----
+    if (path === "/api/link-preview" && request.method === "GET") {
+      const raw = url.searchParams.get("url");
+      if (!raw) return err("缺少 url 參數");
+      const allowLoopback = env.TEST_MEMORY === "1";
+      const checked = previewUrlAllowed(raw, { allowLoopback });
+      if (!checked.ok) return err(checked.error);
+      const preview = await fetchLinkPreview(checked.url, { allowLoopback });
+      if (!preview.ok) return json({ ok: false, url: checked.url, error: preview.error });
+      return json({ ok: true, ...preview.data });
     }
 
     // ---- 頻道 ----

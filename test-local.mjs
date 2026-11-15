@@ -1,6 +1,7 @@
-// 本地測試 v0.2.3：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
+// 本地測試 v0.2.4：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
 // node test-local.mjs
-import worker from "./src/index.js";
+import worker, { parseLinkPreview, previewUrlAllowed } from "./src/index.js";
+import http from "node:http";
 
 const env = { TEST_MEMORY: "1" };
 async function call(method, path, body, token) {
@@ -20,7 +21,8 @@ function assert(c, msg) { if (!c) { console.error("FAIL:", msg); process.exit(1)
 
 // --- v0.1 回歸：健康檢查、種子任務、認領、交結果、核對、討論 ---
 const h = await call("GET", "/");
-assert(h.data.ok && h.data.version === "0.2.3", "health 版本 0.2.3");
+assert(h.data.ok && h.data.version === "0.2.4", "health 版本 0.2.4");
+assert(h.data.endpoints.some(e => e.includes("link-preview")), "health 列出 link-preview 接口");
 assert(h.data.endpoints.some(e => e.includes("challenge")), "health 列出 challenge 接口");
 assert(h.data.endpoints.some(e => e.includes("debate")), "health 列出 debate 接口");
 assert(h.data.endpoints.some(e => e.includes("leaderboard")), "health 列出 leaderboard 接口");
@@ -315,5 +317,63 @@ const readyS2 = await call("GET", `/api/tasks/${daid}`);
 assert(readyS2.data.verify_readiness.ready === true, "數據類補齊 2 位 Agent + 反方 + 3 連結達標");
 const verifyS = await call("POST", `/api/tasks/${daid}/verify`, {});
 assert(verifyS.data.task.status === "done", "數據類核對通過");
+
+// --- v0.2.4 連結卡片 ---
+// 解析：og 標籤優先於一般標籤，實體解碼，只回純文字
+const sampleHtml = `<!doctype html><html><head><title>備用標題</title>
+<meta property="og:title" content="黃仁勳辭職原因分析 &amp; 後續">
+<meta property="og:description" content="董事會連夜開會後接受辭職的完整分析。">
+<meta name="description" content="備用描述"></head><body>hi</body></html>`;
+const parsed = parseLinkPreview(sampleHtml, "https://example.com/report/huang");
+assert(parsed.title === "黃仁勳辭職原因分析 & 後續", "og:title 優先且實體解碼");
+assert(parsed.description === "董事會連夜開會後接受辭職的完整分析。", "og:description 優先");
+assert(parsed.domain === "example.com", "域名正確");
+const parsed2 = parseLinkPreview(`<html><head><title>  純標題 &lt;測試&gt; </title><meta name="description" content="只有描述"></head></html>`, "https://news.example.org/a?x=1");
+assert(parsed2.title === "純標題 <測試>", "無 og 時用 <title>，空白收合");
+assert(parsed2.description === "只有描述", "無 og:description 時用 meta description");
+assert(parseLinkPreview("<html><head></head><body>無標題</body></html>", "https://example.com/").title === "", "無標題時 title 為空字串");
+
+// 網址守門：只放行公開 http/https，擋內網與中繼資料主機
+assert(previewUrlAllowed("ftp://example.com/x").ok === false, "ftp 被擋下");
+assert(previewUrlAllowed("not a url").ok === false, "無效網址被擋下");
+assert(previewUrlAllowed("http://10.1.2.3/x").ok === false, "10.x 私網被擋下");
+assert(previewUrlAllowed("http://192.168.1.1/admin").ok === false, "192.168 私網被擋下");
+assert(previewUrlAllowed("http://169.254.169.254/latest/meta-data/").ok === false, "中繼資料主機被擋下");
+assert(previewUrlAllowed("http://localhost:9/x").ok === false, "localhost 預設被擋下");
+assert(previewUrlAllowed("http://127.0.0.1:9/x", { allowLoopback: true }).ok === true, "測試模式放行 127.0.0.1");
+assert(previewUrlAllowed("https://www.nvidia.com/news").ok === true, "公開 https 通過");
+
+// 接口驗證：缺參數、非 http(s)、內網一律 400
+const pvMissing = await call("GET", "/api/link-preview");
+assert(pvMissing.res.status === 400, "缺 url 參數被擋下");
+const pvFtp = await call("GET", "/api/link-preview?url=" + encodeURIComponent("ftp://example.com/x"));
+assert(pvFtp.res.status === 400, "ftp 連結被擋下");
+const pvPrivate = await call("GET", "/api/link-preview?url=" + encodeURIComponent("http://10.1.2.3/x"));
+assert(pvPrivate.res.status === 400, "私網連結被擋下");
+const pvMeta = await call("GET", "/api/link-preview?url=" + encodeURIComponent("http://169.254.169.254/latest/meta-data/"));
+assert(pvMeta.res.status === 400, "中繼資料連結被擋下");
+
+// 實抓：本地測試伺服器（127.0.0.1，測試模式才放行）
+const previewServer = http.createServer((req, res) => {
+  if (req.url === "/redir") { res.writeHead(302, { Location: "/page" }); res.end(); return; }
+  if (req.url === "/plain") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end("just text"); return; }
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html><head><title>測試報告</title><meta property="og:description" content="這是一份測試報告的摘要。"></head><body>hi</body></html>`);
+});
+await new Promise(r => previewServer.listen(0, "127.0.0.1", r));
+const pvPort = previewServer.address().port;
+const pvPage = await call("GET", "/api/link-preview?url=" + encodeURIComponent(`http://127.0.0.1:${pvPort}/page`));
+assert(pvPage.data.ok === true, "本地頁面預覽成功");
+assert(pvPage.data.title === "測試報告", "預覽標題正確");
+assert(pvPage.data.description === "這是一份測試報告的摘要。", "預覽描述正確");
+assert(pvPage.data.domain === "127.0.0.1", "預覽域名正確");
+assert(pvPage.data.cached === false, "第一次抓取非快取");
+const pvPage2 = await call("GET", "/api/link-preview?url=" + encodeURIComponent(`http://127.0.0.1:${pvPort}/page`));
+assert(pvPage2.data.ok === true && pvPage2.data.cached === true, "第二次同一連結走快取");
+const pvRedir = await call("GET", "/api/link-preview?url=" + encodeURIComponent(`http://127.0.0.1:${pvPort}/redir`));
+assert(pvRedir.data.ok === true && pvRedir.data.title === "測試報告", "重定向跟隨成功");
+const pvPlain = await call("GET", "/api/link-preview?url=" + encodeURIComponent(`http://127.0.0.1:${pvPort}/plain`));
+assert(pvPlain.data.ok === false, "非 HTML 目標回 ok:false，前端退回普通連結");
+await new Promise(r => previewServer.close(r));
 
 console.log("\n全部測試通過。");
