@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import worker from "../src/index.js";
+import { initAuthSchema } from "../src/auth.js";
 
 function memoryD1() {
   const sqlite = new DatabaseSync(":memory:");
@@ -52,6 +53,16 @@ async function owner(request) {
 
 const boardOrigin = { Origin: "https://board.example.test" };
 
+test("auth DDL is compatible with D1 exec's line-oriented parser", async () => {
+  const { DB } = setup();
+  const d1 = { exec(sql) {
+    if (/CREATE TABLE IF NOT EXISTS \w+ \(\s*\n/.test(sql)) throw Error("D1_EXEC_ERROR: incomplete input");
+    return DB.exec(sql);
+  } };
+  await initAuthSchema(d1);
+  assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM principals").get().n, 0);
+});
+
 test("remote migration is additive and can be applied twice", async () => {
   const { DB } = setup();
   DB.sqlite.exec("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT)");
@@ -61,6 +72,13 @@ test("remote migration is additive and can be applied twice", async () => {
   DB.sqlite.exec(migration);
   assert.equal(DB.sqlite.prepare("SELECT title FROM tasks WHERE id=42").get().title, "kept");
   assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM sessions").get().n, 0);
+});
+
+test("dashboard API requires login even during Muse public-read migration", async () => {
+  const { env, request } = setup();
+  env.ALLOW_PUBLIC_READ = "true";
+  assert.equal((await request("GET", "/api/tasks")).status, 200);
+  assert.equal((await request("GET", "/api/tasks", undefined, { "X-Whiteboard-Require-Auth": "1" })).status, 401);
 });
 
 test("private reads, missing D1 and legacy administrative access fail closed", async () => {

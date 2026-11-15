@@ -13,6 +13,7 @@ test("board proxies /api to the bound API and forwards cookies without cache", a
   assert.equal(new URL(received.url).search, "?status=open");
   assert.equal(received.headers.get("Cookie"), "wb_session=existing");
   assert.equal(received.headers.get("Origin"), "https://board.example.test");
+  assert.equal(received.headers.get("X-Whiteboard-Require-Auth"), "1");
   assert.equal(res.headers.get("Set-Cookie"), "wb_session=x; HttpOnly");
   assert.equal(res.headers.get("Cache-Control"), "no-store");
 });

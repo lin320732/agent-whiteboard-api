@@ -42,14 +42,16 @@ node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --file=./schema.sq
 node "$CFCM" wrangler a4a41234 -- deploy
 ```
 
-## v0.2.2 + 权限控制 + 独立控制台（准备上线）
+## v0.2.2 + 权限控制 + 独立控制台（2026-11-15 已上线）
 
 - 本目录现已连接 GitHub 的 `origin/main`，在 `feat/whiteboard-console-auth` 分支开发；实际 `wrangler.toml` 保留原 Cloudflare Account ID 与 D1 ID。Secret 原文不进入 Git。
 - API 在 v0.2.2 基础上加入 D1 存储的人类账号与独立 Agent 凭据、管理员会话；旧 `API_KEY` 在过渡期只允许 Agent 操作，不能审批、核对、退回或强制通过。
 - 控制台 Worker 名 `agent-whiteboard-board`，域名 `board.a4a4.ccwu.cc`，通过 Service Binding 访问后端，不开放控制台的 workers.dev 和 Preview URL。
-- 首次上线前备份原 D1，然后执行 `migrations/0001-auth.sql`：仅建 `force_approvals`、`debate_messages` 和权限相关新表，不覆盖原任务。两次执行同样成功。
-- 配置 `ALLOW_PUBLIC_READ=true` 供 Muse 过渡期读取；所有客户端换成个人 Token 后改为 `false` 并删除旧 `API_KEY`。此阶段仍有匿名读取，务必按 `docs/MUSE_MIGRATION.md` 完成切换后再关闭。
-- 本地验证：`node test-local.mjs` 全部通过，`node --test test/*.test.mjs` 8 项通过；API 与控制台的 Wrangler dry-run 构建通过。
+- 首次上线前已备份原 D1 到本机 `.wrangler/backups/whiteboard-before-022-auth.sql`（0600），然后执行 `migrations/0001-auth.sql`：仅建 `force_approvals`、`debate_messages` 和权限相关新表，不覆盖原任务。线上仍有 5 条任务、1 个频道。
+- 配置 `ALLOW_PUBLIC_READ=true` 供 Muse 过渡期从**原 API 地址**读取；管理台域名下 `/api/*` 始终需要登录。所有客户端换成个人 Token 后改为 `false` 并删除旧 `API_KEY`。此阶段原 API 仍有匿名读取，务必按 `docs/MUSE_MIGRATION.md` 完成切换后再关闭。
+- 本地验证：`node test-local.mjs` 全部通过，`node --test test/*.test.mjs` 10 项通过；API 与控制台的 Wrangler dry-run 构建通过。
 
-上线操作顺序：D1 导出备份 → 增量迁移 → 设置一次性 `BOOTSTRAP_KEY` Secret → 部署 API → 部署控制台 → 运行 `node scripts/bootstrap-admin.mjs` 并将本地 `.admin-login.json` 转入个人密码管理器 → 验证权限 → 删除 Cloudflare `BOOTSTRAP_KEY` Secret。所有 Secret 文件均仅保留本机 0600 权限并列入 `.gitignore`。
+已按上述顺序部署。初次上线健康检查曾返回 503：Worker 端 D1 `exec` 不接受多行 `CREATE TABLE`；改为逐条单行执行并增加回归测试后重新发布，健康检查恢复 `version: 0.2.2, storage: d1`。控制台域名 GET `/` 为 200，**未登录访问控制台 `/api/tasks` 为 401**，管理员登录后为 200；原 API 的业务 GET 迁移期为 200。旧 `API_KEY` 的 verify/approve 为 403。已建立初始管理员 `owner`，本机登录资料位于 `.admin-login.json`（0600，未入 Git）；管理员会话登录和账号列表通过，个人 Muse 令牌尝试管理接口得到 403。一次性 `BOOTSTRAP_KEY` 已从 Cloudflare 与本机删除，API_KEY 仍保留供迁移期 Agent 使用。
+
+**尚待 Muse 迁移：** 当前 `ALLOW_PUBLIC_READ=true`，业务 GET 暂时公开。按 `docs/MUSE_MIGRATION.md` 改完 Muse，并给现有 Agent 发独立令牌之后，才把读取开关设为 `false` 并从 Cloudflare 删除旧 `API_KEY`；此步需和 Muse 维护者协调。
 

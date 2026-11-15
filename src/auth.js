@@ -26,7 +26,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL
 );`;
 
-export async function initAuthSchema(db) { await db.exec(AUTH_SCHEMA); }
+export async function initAuthSchema(db) {
+  // D1's Worker exec parses one SQL statement per line; flatten each DDL first.
+  for (const sql of AUTH_SCHEMA.split(";")) {
+    const statement = sql.replace(/\s+/g, " ").trim();
+    if (statement) await db.exec(`${statement};`);
+  }
+}
 
 export async function hashSecret(secret) {
   const bytes = new TextEncoder().encode(secret);

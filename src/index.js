@@ -269,7 +269,10 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    const useDb = await dbInit(env).catch(() => false);
+    const useDb = await dbInit(env).catch(error => {
+      console.error("whiteboard-d1-init", error?.message || String(error));
+      return false;
+    });
     if (!useDb && !(env.TEST_MEMORY === "1" && ["localhost", "127.0.0.1"].includes(url.hostname))) return err("D1 暫時不可用，請稍後再試", 503);
 
     // 健康檢查公開；業務資料和寫入均由 API Worker 逐請求校驗。
@@ -283,7 +286,8 @@ export default {
       if (handled) return handled;
     }
     const action = routeAction(request.method, path);
-    if (action && !(action === "read" && env.ALLOW_PUBLIC_READ === "true") && !permit(principal, action))
+    const migrationRead = action === "read" && env.ALLOW_PUBLIC_READ === "true" && request.headers.get("X-Whiteboard-Require-Auth") !== "1";
+    if (action && !migrationRead && !permit(principal, action))
       return err(principal ? "權限不足" : "請先登入或帶個人 Token", principal ? 403 : 401);
     if (action && !originAllowed(request, env, principal)) return err("來源不符", 403);
 

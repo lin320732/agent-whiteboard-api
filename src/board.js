@@ -13,7 +13,9 @@ export default {
       const target = new URL(request.url);
       target.hostname = "api.internal";
       target.protocol = "https:";
-      const res = await env.API.fetch(new Request(target, request));
+      const forwarded = new Request(target, request);
+      forwarded.headers.set("X-Whiteboard-Require-Auth", "1");
+      const res = await env.API.fetch(forwarded);
       const headers = new Headers(res.headers);
       headers.set("Cache-Control", "no-store");
       return new Response(res.body, { status: res.status, headers });
