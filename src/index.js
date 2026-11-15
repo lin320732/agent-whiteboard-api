@@ -1,4 +1,4 @@
-// Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.1 審核門檻）
+// Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
 // 其他 Muse / Agent 只要拿到網址 + Token，就能讀寫同一份任務。
 // 持久化：有 D1 綁定（env.DB）時用 D1，否則用記憶體（重啟會丟失，僅供本地測試）。
@@ -23,10 +23,19 @@
 //    理由寫進 force_approvals 表並隨單任務讀出；不帶理由會被擋下。
 //    已完成的任務不受影響，門檻只攔新的核對通過。
 //
+// v0.2.2 新增（v0.2.1 接口全部不變）：
+//  - 辯論：每條任務有一串聊天式辯論訊息（debate_messages 表）。
+//    POST /api/tasks/:id/debate 發言 {agent, role, stance, content, links, reply_to}；
+//    GET /api/tasks/:id/debate 公開讀，按時間順序；GET /api/tasks/:id 也回傳 debate。
+//    立場 stance：支持 / 反駁 / 補充。反駁必須帶理由（content）與至少一條證據連結，
+//    否則 400。辯論是討論層，不產生結果版本（v1/v2/v3 仍由 supplement 產生）。
+//  - 辯論反駁計入 v0.2.1 門檻的反方：反駁者與結果提交者不同時，等同質疑；
+//    辯論發言者也計入「至少 2 位不同 Agent 參與」。
+//
 // 安全：Token 不寫在代碼裡。寫操作帶 Authorization: Bearer <你的 Token>，
 // Token 由部署者用 wrangler secret put API_KEY 設定。
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -75,18 +84,26 @@ function extractUrls(text) {
   return [...new Set(found.map(u => u.replace(/[.,;)\]}]+$/, "")))];
 }
 
-function computeReadiness(task, challenges, supplements, eventAgents) {
+// 辯論立場：接受中文或英文別名，統一存中文
+const STANCES = { "支持": "支持", "support": "支持", "反駁": "反駁", "rebut": "反駁", "補充": "補充", "add": "補充" };
+function normalizeStance(v) { return STANCES[String(v || "").trim()] || ""; }
+
+function computeReadiness(task, challenges, supplements, eventAgents, debate) {
   const agents = new Set();
   if (task.claimed_by) agents.add(task.claimed_by);
   for (const a of eventAgents || []) if (a) agents.add(a);
   for (const c of challenges || []) if (c.agent) agents.add(c.agent);
   for (const s of supplements || []) if (s.agent) agents.add(s.agent);
+  for (const d of debate || []) if (d.agent) agents.add(d.agent);
   const submitter = task.claimed_by || "";
   const challengers = [...new Set((challenges || []).filter(c => c.agent && c.agent !== submitter).map(c => c.agent))];
+  // v0.2.2：辯論裡的反駁（發言者與提交者不同）也算反方
+  const rebutters = [...new Set((debate || []).filter(d => d.stance === "反駁" && d.agent && d.agent !== submitter).map(d => d.agent))];
+  const contra = [...new Set([...challengers, ...rebutters])];
   const links = new Set([...extractUrls(task.result_links), ...(supplements || []).flatMap(s => extractUrls(s.links))]);
   const checks = [
     { key: "agents", label: "至少 2 位不同 Agent 參與", met: agents.size >= 2, detail: `已參與 ${agents.size} 位${agents.size ? "：" + [...agents].join("、") : ""}（需 2 位）` },
-    { key: "challenge", label: "已有反方質疑（質疑者與提交者不同）", met: challengers.length > 0, detail: challengers.length ? `已有反方質疑：${challengers.join("、")}` : "暫無反方質疑" },
+    { key: "challenge", label: "已有反方質疑（質疑或辯論反駁，發言者與提交者不同）", met: contra.length > 0, detail: contra.length ? `已有反方：${contra.join("、")}` : "暫無反方質疑" },
     { key: "links", label: "來源連結至少 3 條", met: links.size >= 3, detail: `已引用 ${links.size} 條（需 3 條）` },
   ];
   return { ready: checks.every(c => c.met), checks };
@@ -97,16 +114,17 @@ function gateError(readiness) {
   return "核對條件未滿足：" + unmet.map(c => c.detail).join("；") + "。可由負責人強制通過（verify 帶 force: true 與 force_reason 一句話理由）。";
 }
 
-// 讀一條任務的全部上下文（任務、質疑、補充、參與事件、強制通過記錄）
+// 讀一條任務的全部上下文（任務、質疑、補充、辯論、參與事件、強制通過記錄）
 async function loadTaskContext(env, useDb, id) {
   if (useDb) {
     const task = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
     if (!task) return null;
     const challenges = (await env.DB.prepare("SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
     const supplements = (await env.DB.prepare("SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
+    const debate = (await env.DB.prepare("SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
     const ev = (await env.DB.prepare("SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')").bind(id).all()).results;
     const forceApprovals = (await env.DB.prepare("SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-    return { task, challenges, supplements, eventAgents: ev.map(r => r.agent), forceApprovals };
+    return { task, challenges, supplements, debate, eventAgents: ev.map(r => r.agent), forceApprovals };
   }
   const task = mem.tasks.find(x => x.id === id);
   if (!task) return null;
@@ -114,6 +132,7 @@ async function loadTaskContext(env, useDb, id) {
     task,
     challenges: mem.challenges.filter(x => x.task_id === id),
     supplements: mem.supplements.filter(x => x.task_id === id),
+    debate: mem.debate.filter(x => x.task_id === id),
     eventAgents: mem.events.filter(e => e.task_id === id && ["claim", "result", "challenge", "supplement"].includes(e.type)).map(e => e.agent),
     forceApprovals: (mem.forceApprovals || []).filter(x => x.task_id === id),
   };
@@ -133,10 +152,11 @@ function seedMemory() {
     messages: [],
     challenges: [],
     supplements: [],
+    debate: [],
     events: [],
     forceApprovals: [],
     nextChannel: 2, nextTask: 4, nextMessage: 1,
-    nextChallenge: 1, nextSupplement: 1, nextEvent: 1, nextForceApproval: 1,
+    nextChallenge: 1, nextSupplement: 1, nextDebate: 1, nextEvent: 1, nextForceApproval: 1,
   };
 }
 let mem = seedMemory();
@@ -155,7 +175,8 @@ async function dbInit(env) {
   CREATE TABLE IF NOT EXISTS challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT DEFAULT '', created_at TEXT);
   CREATE TABLE IF NOT EXISTS supplements (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, summary TEXT NOT NULL, links TEXT DEFAULT '', version INTEGER NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);
-  CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);`);
+  CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);
+  CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);`);
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
@@ -214,6 +235,7 @@ const ENDPOINTS = [
   "POST /api/tasks/:id/verify", "POST /api/tasks/:id/reopen",
   "POST /api/tasks/:id/challenge", "GET /api/tasks/:id/challenges",
   "POST /api/tasks/:id/supplement", "GET /api/tasks/:id/supplements",
+  "POST /api/tasks/:id/debate", "GET /api/tasks/:id/debate",
   "POST /api/tasks/:id/approve", "POST /api/tasks/:id/reject",
   "GET /api/leaderboard",
   "GET /api/messages?channelId=1", "POST /api/messages",
@@ -268,7 +290,7 @@ export default {
         const r = await env.DB.prepare(sql).bind(...args).all();
         for (const t of r.results) {
           const ctx = await loadTaskContext(env, true, t.id);
-          t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+          t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
         }
         return json({ ok: true, tasks: r.results });
       }
@@ -277,7 +299,7 @@ export default {
       if (channelId) list = list.filter(t => t.channel_id === Number(channelId));
       for (const t of list) {
         const ctx = await loadTaskContext(env, false, t.id);
-        t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+        t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
       }
       return json({ ok: true, tasks: list });
     }
@@ -305,8 +327,8 @@ export default {
       const id = Number(single[1]);
       const ctx = await loadTaskContext(env, useDb, id);
       if (!ctx) return err("任務不存在", 404);
-      const { task, challenges, supplements, eventAgents, forceApprovals } = ctx;
-      return json({ ok: true, task, challenges, supplements, verify_readiness: computeReadiness(task, challenges, supplements, eventAgents), force_approvals: forceApprovals });
+      const { task, challenges, supplements, debate, eventAgents, forceApprovals } = ctx;
+      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: computeReadiness(task, challenges, supplements, eventAgents, debate), force_approvals: forceApprovals });
     }
 
     // ---- 質疑 / 補充列表 ----
@@ -321,6 +343,58 @@ export default {
         rows = kind === "challenges" ? mem.challenges.filter(x => x.task_id === id) : mem.supplements.filter(x => x.task_id === id);
       }
       return json({ ok: true, [kind]: rows });
+    }
+
+    // ---- 辯論（v0.2.2）：聊天式討論層，不產生結果版本 ----
+    const debateMatch = path.match(/^\/api\/tasks\/(\d+)\/debate$/);
+    if (debateMatch) {
+      const id = Number(debateMatch[1]);
+      if (request.method === "GET") {
+        let rows;
+        if (useDb) {
+          rows = (await env.DB.prepare("SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
+        } else {
+          rows = mem.debate.filter(x => x.task_id === id);
+        }
+        return json({ ok: true, debate: rows });
+      }
+      if (request.method === "POST") {
+        const a = needAuth(request, env); if (a) return a;
+        const b = await request.json().catch(() => ({}));
+        const now = new Date().toISOString();
+        const stance = normalizeStance(b.stance);
+        const replyTo = b.reply_to ?? b.replyTo ?? null;
+        // 先確認任務存在（已關閉的提議不辯論），再驗證發言內容
+        if (useDb) {
+          const cur = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
+          if (!cur) return err("任務不存在", 404);
+          if (cur.status === "closed") return err("已關閉的任務不能辯論");
+          if (!b.agent) return err("缺少 agent（發言的 Agent 名字）");
+          if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
+          if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
+          const links = extractUrls(linksToString(b.links));
+          if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
+          if (replyTo != null) {
+            const target = await env.DB.prepare("SELECT id FROM debate_messages WHERE id=? AND task_id=?").bind(Number(replyTo), id).first();
+            if (!target) return err("reply_to 指定的辯論訊息不存在");
+          }
+          const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, b.agent, b.role || "agent", stance, String(b.content).trim(), links.join("\n"), replyTo != null ? Number(replyTo) : null, now).run();
+          const message = await env.DB.prepare("SELECT * FROM debate_messages WHERE id=?").bind(r.meta.last_row_id).first();
+          return json({ ok: true, message }, 201);
+        }
+        const t = mem.tasks.find(x => x.id === id);
+        if (!t) return err("任務不存在", 404);
+        if (t.status === "closed") return err("已關閉的任務不能辯論");
+        if (!b.agent) return err("缺少 agent（發言的 Agent 名字）");
+        if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
+        if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
+        const links = extractUrls(linksToString(b.links));
+        if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
+        if (replyTo != null && !mem.debate.some(x => x.id === Number(replyTo) && x.task_id === id)) return err("reply_to 指定的辯論訊息不存在");
+        const message = { id: mem.nextDebate++, task_id: id, agent: b.agent, role: b.role || "agent", stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: replyTo != null ? Number(replyTo) : null, created_at: now };
+        mem.debate.push(message);
+        return json({ ok: true, message }, 201);
+      }
     }
 
     // ---- 單個任務動作 ----
@@ -351,7 +425,7 @@ export default {
           if (cur.status !== "review") return err(`只能核對待核對的任務，現在是 ${cur.status}`);
           // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
           const ctx = await loadTaskContext(env, true, id);
-          const readiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents);
+          const readiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
           let forced = false, forceReason = "";
           if (!readiness.ready) {
             if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);
@@ -424,7 +498,7 @@ export default {
         if (t.status !== "review") return err(`只能核對待核對的任務，現在是 ${t.status}`);
         // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
         const ctx = await loadTaskContext(env, false, id);
-        const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+        const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
         let forced = false, forceReason = "";
         if (!readiness.ready) {
           if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);

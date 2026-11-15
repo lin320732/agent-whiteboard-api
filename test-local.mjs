@@ -1,4 +1,4 @@
-// 本地測試 v0.2.0：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
+// 本地測試 v0.2.2：不用 Cloudflare 帳號，直接用 Node 跑 Worker 的 fetch。
 // node test-local.mjs
 import worker from "./src/index.js";
 
@@ -20,8 +20,9 @@ function assert(c, msg) { if (!c) { console.error("FAIL:", msg); process.exit(1)
 
 // --- v0.1 回歸：健康檢查、種子任務、認領、交結果、核對、討論 ---
 const h = await call("GET", "/");
-assert(h.data.ok && h.data.version === "0.2.1", "health 版本 0.2.1");
+assert(h.data.ok && h.data.version === "0.2.2", "health 版本 0.2.2");
 assert(h.data.endpoints.some(e => e.includes("challenge")), "health 列出 challenge 接口");
+assert(h.data.endpoints.some(e => e.includes("debate")), "health 列出 debate 接口");
 assert(h.data.endpoints.some(e => e.includes("leaderboard")), "health 列出 leaderboard 接口");
 
 const list = await call("GET", "/api/tasks?status=open&channelId=1");
@@ -186,5 +187,70 @@ assert(forceDetail.data.force_approvals[0].reason.includes("親自核對"), "強
 // 任務列表也帶核對條件
 const listAll = await call("GET", "/api/tasks");
 assert(listAll.data.tasks.every(t => t.verify_readiness && Array.isArray(t.verify_readiness.checks)), "任務列表每條都帶 verify_readiness");
+
+// --- v0.2.2 辯論 ---
+// 新任務：Agent D 交結果（1 條連結），再用辯論湊門檻
+const debateTask = await call("POST", "/api/tasks", { title: "辯論測試任務", channelId: 1, createdBy: "LV" });
+assert(debateTask.data.status === "open", "辯論測試任務建立成功");
+const dtid = debateTask.data.id;
+await call("POST", `/api/tasks/${dtid}/claim`, { agent: "Agent D", role: "researcher" });
+await call("POST", `/api/tasks/${dtid}/result`, { summary: "初步結論：A 說法成立", links: ["https://example.com/d1"] });
+
+const debateEmpty = await call("GET", `/api/tasks/${dtid}/debate`);
+assert(Array.isArray(debateEmpty.data.debate) && debateEmpty.data.debate.length === 0, "辯論一開始是空的");
+
+const support = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent D", stance: "支持", content: "我同意這個結論，補一個理由" });
+assert(support.res.status === 201, "支持發言成功，不用連結");
+assert(support.data.message.stance === "支持", "立場存為 支持");
+
+const rebutNoLink = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent D", stance: "反駁", content: "我不同意" });
+assert(rebutNoLink.res.status === 400, "反駁沒附證據連結被擋下");
+const rebutEmptyLinks = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent D", stance: "反駁", content: "我不同意", links: [] });
+assert(rebutEmptyLinks.res.status === 400, "反駁連結為空被擋下");
+const rebutNoContent = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent E", stance: "反駁", content: "  ", links: ["https://example.com/e1"] });
+assert(rebutNoContent.res.status === 400, "反駁沒寫理由被擋下");
+const badStance = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent E", stance: "中立", content: "我中立" });
+assert(badStance.res.status === 400, "錯誤立場被擋下");
+const debateMissing = await call("POST", "/api/tasks/999/debate", { agent: "Agent E", stance: "支持", content: "沒有這個任務" });
+assert(debateMissing.res.status === 404, "辯論不存在的任務被擋下");
+
+// 提交者自己的反駁不算反方
+const selfRebut = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent D", stance: "反駁", content: "我自己再想想，這裡可能有問題", links: ["https://example.com/d2"] });
+assert(selfRebut.res.status === 201, "提交者自己的反駁可以發（只是不算反方）");
+const readySelfRebut = await call("GET", `/api/tasks/${dtid}`);
+assert(readySelfRebut.data.verify_readiness.checks.find(c => c.key === "challenge").met === false, "提交者自己的辯論反駁不算反方");
+assert(readySelfRebut.data.debate.length === 2, "單任務帶 2 條辯論");
+
+// 第二位 Agent 反駁 + 回覆引用
+const rebutE = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent E", stance: "反駁", content: "A 說法站不住腳，數據有另一種解讀", links: ["https://example.com/e1"] });
+assert(rebutE.res.status === 201, "第二位 Agent 的反駁成功");
+const addF = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent F", stance: "補充", content: "補一個第三方數據，兩邊說法各對一半", links: ["https://example.com/f1"], reply_to: rebutE.data.message.id });
+assert(addF.res.status === 201, "補充發言成功");
+assert(addF.data.message.reply_to === rebutE.data.message.id, "回覆引用了反駁訊息");
+const badReply = await call("POST", `/api/tasks/${dtid}/debate`, { agent: "Agent F", stance: "補充", content: "回覆不存在的訊息", reply_to: 9999 });
+assert(badReply.res.status === 400, "回覆不存在的訊息被擋下");
+
+const debateList = await call("GET", `/api/tasks/${dtid}/debate`);
+assert(debateList.data.debate.length === 4, "辯論列表讀回 4 條");
+assert(debateList.data.debate[0].stance === "支持" && debateList.data.debate[3].stance === "補充", "辯論按時間順序排列");
+assert(debateList.data.debate[3].reply_to === rebutE.data.message.id, "列表裡回覆引用正確");
+
+// 辯論反駁計入門檻反方：此時 3 位 Agent、有反方、連結仍只有 1 條 -> 未達標
+const readyDebate = await call("GET", `/api/tasks/${dtid}`);
+assert(readyDebate.data.verify_readiness.checks.find(c => c.key === "challenge").met === true, "辯論反駁計入門檻反方");
+assert(readyDebate.data.verify_readiness.checks.find(c => c.key === "agents").met === true, "辯論發言者計入參與 Agent（3 位）");
+assert(readyDebate.data.verify_readiness.ready === false, "連結只有 1 條，仍未達標");
+assert(readyDebate.data.debate.length === 4, "單任務回傳 debate 陣列");
+
+// 補充（版本層）補足 3 條連結 -> 達標；辯論本身不產生版本
+const supDebate = await call("POST", `/api/tasks/${dtid}/supplement`, { agent: "Agent F", summary: "補兩個來源", links: ["https://example.com/f2", "https://example.com/f3"] });
+assert(supDebate.data.supplement.version === 2, "辯論測試任務的補充是 v2（辯論沒佔版本號）");
+const readyDebate2 = await call("GET", `/api/tasks/${dtid}`);
+assert(readyDebate2.data.verify_readiness.ready === true, "辯論反駁 + 補充湊滿 3 條連結，達到門檻");
+const verifyDebate = await call("POST", `/api/tasks/${dtid}/verify`, {});
+assert(verifyDebate.data.task.status === "done", "辯論湊滿門檻後核對通過");
+const supListDebate = await call("GET", `/api/tasks/${dtid}/supplements`);
+assert(supListDebate.data.supplements.length === 1, "辯論沒有產生補充版本（仍只有 1 個補充）");
+assert(!readyDebate2.data.task.result_summary.includes("兩邊說法各對一半"), "辯論內容沒有混進結果正文");
 
 console.log("\n全部測試通過。");

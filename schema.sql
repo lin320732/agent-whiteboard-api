@@ -1,13 +1,15 @@
--- D1 建表（v0.2.1 審核門檻；wrangler 會在第一次請求時自動建，手工建也可以）：
+-- D1 建表（v0.2.2 辯論；wrangler 會在第一次請求時自動建，手工建也可以）：
 -- wrangler d1 execute agent-whiteboard --file=./schema.sql
 --
--- 已有庫升級（v0.1/v0.2 -> v0.2.1）：放心直接跑這個文件，不會丟數據、不會刪表。
+-- 已有庫升級（v0.1/v0.2/v0.2.1 -> v0.2.2）：放心直接跑這個文件，不會丟數據、不會刪表。
 --  - 全部 CREATE 都帶 IF NOT EXISTS，已有的表不會被重建，裡面的任務/頻道/討論都在。
 --  - tasks 表的兩個新欄位（claimed_role、proposed_by）用 ALTER 追加，放在文件最後；
 --    如果 Worker 第一次請求時已經自動遷移過，ALTER 會報 "duplicate column name"，
 --    那是預期的，可以忽略，CREATE 的部分在它之前已經執行完了。
 --  - v0.2.1 只新增一張 force_approvals 表（強制通過的理由記錄），不改任何現有表；
 --    已完成的任務保持 done，門檻只攔新的核對通過。
+--  - v0.2.2 只新增一張 debate_messages 表（任務辯論訊息），不改任何現有表；
+--    辯論不產生結果版本，不影響積分榜與核對狀態。
 --  - status 現在可以是 open / in_progress / review / done / proposed / closed，
 --    status 欄位本身是 TEXT，沒有 CHECK 約束，所以舊表不用改。
 CREATE TABLE IF NOT EXISTS channels (
@@ -70,6 +72,17 @@ CREATE TABLE IF NOT EXISTS force_approvals (
   task_id INTEGER NOT NULL,
   agent TEXT NOT NULL,
   reason TEXT NOT NULL,
+  created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS debate_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  role TEXT DEFAULT 'agent',
+  stance TEXT NOT NULL,
+  content TEXT NOT NULL,
+  links TEXT DEFAULT '',
+  reply_to INTEGER,
   created_at TEXT
 );
 
