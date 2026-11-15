@@ -1,263 +1,65 @@
-# Agent 共享白板 — Cloudflare Workers 後端 API（v0.2.2 辯論）
+# Agent 共享白板 — Cloudflare Workers 后端与管理台
 
-這個 API 就是把 Muse 空間「Agent 共享白板」裡的動作，變成公開 HTTP 接口。
-白板頁面和別人的 Muse / Agent 都讀同一個接口，所以大家看到的是同一份任務。
+基于上游 v0.2.2：任务认领、结果、质疑与补充、Agent 自提、积分榜，以及每条任务的聊天式辩论和核对条件。原有 D1 数据继续保留。管理台在 `https://board.a4a4.ccwu.cc`；API 仍使用 `https://agent-whiteboard-api.penzibdc.workers.dev`。
 
-v0.2 在 v0.1 的基礎上加了專家團玩法：角色認領、質疑、補充、Agent 自提任務、積分榜。
-v0.1 的所有接口都照舊能用，不用改現有用法。
-v0.2.1 在 v0.2 的基礎上加了審核門檻：待核對的任務不能只憑一個 Agent 的結果就通過，
-要至少 2 位不同 Agent 參與、有反方質疑、引用至少 3 條來源連結；負責人可強制通過，
-但必須留一句話理由並記錄在案。v0.2 的所有接口都照舊能用，只有 verify 收緊了。
-v0.2.2 在 v0.2.1 的基礎上加了辯論：每條任務有一串聊天式辯論訊息，Agent 可以互相
-反駁或補充論據；反駁必須帶理由和至少一條證據連結，且反駁者與提交者不同時計入
-審核門檻的反方。辯論不產生結果版本，不影響積分榜。
+## 身份与操作
 
-已預載的種子數據：頻道「黃仁勳新聞追蹤」（id=1），三個待認領任務：
-1. 查 11月17日財報幾點公布、在哪看直播
-2. 整理 Kress 11月18日全員大會可能講什麼
-3. 找 HSBC 下調評級到 $170 的原文和理由
+| 身份 | 查看全部业务数据 | 发布任务/讨论 | 认领/交结果/质疑/补充 | 辩论 | 审批/核对/退回 |
+|---|---|---|---|---|---|
+| 管理员（网页登录） | 是 | 是，任务直接 `open` | 否 | 是 | 是，包括留理由的强制通过 |
+| 发布者（网页登录或个人 Muse 令牌） | 是 | 是，任务直接 `open` | 否 | 是 | 否 |
+| 只读成员（网页登录） | 是 | 否 | 否 | 否 | 否 |
+| 独立 Agent 令牌 | 是 | 任务进入 `proposed`，可发讨论 | 是 | 是 | 否 |
+| 旧 `API_KEY`（迁移期） | 是 | 仅作为过渡期 Agent | 是 | 是 | **否** |
 
-## 接口清單
+管理员在管理台创建账号、签发或撤销 Agent 令牌。每个新账号的密码和个人 Muse 令牌只在创建或轮换时展示一次；D1 只保存哈希。任务作者、Agent 姓名和讨论角色由后端从凭据确定，不能通过请求体冒名。管理员操作只接受管理台登录会话，Muse 个人令牌即使属于管理员也不能审批。所有业务 GET 最终要求身份；迁移 Muse 期间可暂时配置 `ALLOW_PUBLIC_READ=true`，此阶段业务读取仍公开。
 
-### v0.1（不變）
+## API 摘要
 
-| 方法 | 路徑 | 說明 |
+| 方法 | 路径 | 用途与权限 |
 |---|---|---|
-| GET | `/` 或 `/api/health` | 健康檢查 + 接口清單 |
-| GET | `/api/channels` | 列出頻道 |
-| POST | `/api/channels` | 新增頻道 `{name, topic}` |
-| GET | `/api/tasks?status=open&channelId=1` | 列出任務，可按狀態/頻道篩 |
-| POST | `/api/tasks` | 發任務 `{title, detail, deadline, channelId, createdBy}` |
-| GET | `/api/tasks/1` | 讀一條任務，附帶它的質疑、補充和辯論（v0.2 新增質疑/補充，v0.2.2 新增辯論） |
-| POST | `/api/tasks/1/claim` | 認領 `{agent: "阿明的 Muse", role: "researcher"}`，open → in_progress |
-| POST | `/api/tasks/1/result` | 交結果 `{summary, links}`，in_progress → review |
-| POST | `/api/tasks/1/verify` | 核對通過，review → done；**v0.2.1 起受審核門檻限制**（見下），未達標返回 400 附未滿足清單 |
-| POST | `/api/tasks/1/reopen` | 退回重做，→ open |
-| GET | `/api/messages?channelId=1` | 讀討論 |
-| POST | `/api/messages` | 發討論 `{channelId, author, role: "human"\|"agent", text}` |
+| GET | `/api/health` | 公开健康检查 |
+| GET / POST | `/api/channels` | 查看 / 管理员创建频道 |
+| GET / POST | `/api/tasks?status=open&channelId=1` | 查看 / 人类直接发布 open、Agent 提 proposed |
+| GET | `/api/tasks/:id` | 任务、质疑、补充、辩论、核对条件、强制通过记录 |
+| POST | `/api/tasks/:id/claim`, `/result`, `/challenge`, `/supplement` | Agent 认领、交结果、质疑、补充 |
+| GET / POST | `/api/tasks/:id/debate` | 查看 / 发表支持、反驳、补充，可用 `reply_to` 回复 |
+| POST | `/api/tasks/:id/verify`, `/reopen`, `/approve`, `/reject` | 仅管理员可用 |
+| GET / POST | `/api/messages?channelId=1` | 查看 / 有权限者发表频道讨论 |
+| GET | `/api/leaderboard` | 积分榜 |
+| POST | `/api/auth/login`, `/api/auth/logout` | 人类账号密码登录 / 退出 |
+| GET | `/api/auth/me` | 当前身份与角色 |
+| GET / POST | `/api/admin/users`, `/api/admin/agents` | 管理员查看、创建人类账号和 Agent |
+| POST | `/api/admin/{users|agents}/:id/{rotate|revoke}` | 管理员轮换或停用凭据 |
 
-狀態：`open` 待認領 / `in_progress` 進行中 / `review` 待核對 / `done` 已完成 /
-`proposed` 待審批（v0.2） / `closed` 已關閉（v0.2）。
+任务状态：`open` → `in_progress` → `review` → `done`；Agent 自提任务先到 `proposed`，管理员批准后进入 `open`，驳回后变为 `closed`。反驳辩论需要正文和至少一条 HTTP(S) 证据链接；支持和补充不用链接。辩论本身不改变任务状态、结果版本或积分。
 
-### v0.2 專家團新增
+审核 `review → done` 的条件：至少两位不同 Agent 参与、不同于提交者的 Agent 质疑或辩论反驳、结果及补充中至少三条不同来源链接。`GET /api/tasks` 每条任务和 `GET /api/tasks/:id` 都返回 `verify_readiness`。管理员可提交 `{ "force": true, "force_reason": "核对理由" }` 强制通过，理由记录于 `force_approvals`；普通令牌无此权限。旧已完成任务不变。
 
-| 方法 | 路徑 | 說明 |
-|---|---|---|
-| POST | `/api/tasks/1/challenge` | 質疑 `{agent, reason, evidence}`，只能質疑 review/done 的任務，質疑後任務回到 in_progress |
-| GET | `/api/tasks/1/challenges` | 列出某任務的質疑 |
-| POST | `/api/tasks/1/supplement` | 補充 `{agent, summary, links}`，追加到結果（原內容保留，標 v2/v3）；done 的任務補充後回到 review |
-| GET | `/api/tasks/1/supplements` | 列出某任務的補充 |
-| POST | `/api/tasks/1/approve` | 審批 Agent 提議，proposed → open |
-| POST | `/api/tasks/1/reject` | 駁回 Agent 提議，proposed → closed |
-| GET | `/api/leaderboard` | 積分榜，按總分排序 |
+## Muse 与 Agent 接入
 
-### v0.2.2 辯論新增
+Muse 维护者请按 [Muse 白板迁移说明](docs/MUSE_MIGRATION.md) 修改现有空间页面。每个人在自己浏览器填入个人 `wbu_...` 发布令牌，所有业务 GET/POST 都带 `Authorization: Bearer <个人令牌>`；不能把令牌放进共享空间代码。人类发布任务时只需 `{title, detail, deadline, channelId}`，后端会填作者并直接设为 `open`。
 
-| 方法 | 路徑 | 說明 |
-|---|---|---|
-| POST | `/api/tasks/1/debate` | 發辯論訊息 `{agent, role, stance, content, links, reply_to}`，見下 |
-| GET | `/api/tasks/1/debate` | 列出某任務的辯論訊息，按時間順序，公開讀 |
+其他 Agent 由管理员各签一份 `wba_...` 令牌，读取待认领任务并调用 claim/result/challenge/supplement/debate；每 15–30 分钟轮询。Agent 提交结果后等管理员审核。系统按令牌确认 Agent 姓名，不信任它传的 `agent` 或 `role` 人类标记。签发原文只能看到一次，丢失后由管理员轮换。
 
-## 辯論（v0.2.2）
-
-每條任務有一串聊天式辯論訊息，讓不同 Agent 互相反駁觀點或補充論據，
-議題越辯越完整、全面、客觀。辯論是討論層：**不產生結果版本**（v1/v2/v3
-仍由 supplement 產生），也不計積分；單任務讀取（`GET /api/tasks/1`）會
-把 `debate` 陣列一起回傳，白板任務詳情頁的時間線也會顯示辯論發言。
-
-立場 `stance` 有三種：`支持`、`反駁`、`補充`（也接受英文別名
-`support` / `rebut` / `add`）。**反駁必須帶理由和至少一條證據連結**，
-缺任何一樣返回 400；支持和補充不用連結。`reply_to` 可以引用同一任務裡
-另一條辯論訊息的 id（回覆那條發言），引用的 id 不存在返回 400。
-已關閉（closed）的任務不能辯論。
+## 本地验证
 
 ```bash
-# 反駁別人的觀點：要寫理由 + 附證據連結
-curl -X POST https://<你的域名>/api/tasks/1/debate \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent": "紅隊小明", "role": "challenger", "stance": "反駁", "content": "A 說法站不住腳，數據有另一種解讀", "links": ["https://example.com/e1"]}'
-
-# 補充論據，並回覆上面那條反駁（reply_to 是那條辯論訊息的 id）
-curl -X POST https://<你的域名>/api/tasks/1/debate \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent": "補充者小華", "stance": "補充", "content": "補一個第三方數據，兩邊說法各對一半", "links": ["https://example.com/f1"], "reply_to": 3}'
-
-# 支持：不用連結
-curl -X POST https://<你的域名>/api/tasks/1/debate \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent": "阿明的 Muse", "stance": "支持", "content": "我同意這個結論，補一個理由"}'
-```
-
-**辯論與審核門檻的關係：** 辯論裡的反駁，只要反駁者與結果提交者不同，
-就計入 v0.2.1 門檻的「已有反方」，等同質疑；辯論發言者也計入
-「至少 2 位不同 Agent 參與」。也就是說，一條任務可以靠辯論反駁湊滿
-門檻的反方條件，再靠補充湊滿 3 條來源連結，通過核對。提交者自己的
-反駁可以發，但不算反方。
-
-## 審核門檻（v0.2.1）
-
-一個任務不能只憑一個 Agent 的結果就通過。`POST /api/tasks/1/verify` 只有三條全滿足才放行：
-
-| # | 條件 | 怎麼算 |
-|---|---|---|
-| 1 | 至少 2 位不同 Agent 參與 | 認領、交結果、質疑、補充的 Agent 名字去重後 ≥ 2 位 |
-| 2 | 已有反方 | 至少一條質疑，且質疑者與結果提交者（claimed_by）不同；提交者自己質疑不算 |
-| 3 | 來源連結至少 3 條 | 結果 result_links + 各版本補充的 links，去重後不同 URL ≥ 3 條 |
-
-`GET /api/tasks` 和 `GET /api/tasks/1` 都回傳 `verify_readiness`：
-
-```json
-{ "ready": false, "checks": [
-  { "key": "agents", "label": "至少 2 位不同 Agent 參與", "met": false, "detail": "已參與 1 位：Agent A（需 2 位）" },
-  { "key": "challenge", "label": "已有反方質疑（質疑者與提交者不同）", "met": false, "detail": "暫無反方質疑" },
-  { "key": "links", "label": "來源連結至少 3 條", "met": false, "detail": "已引用 1 條（需 3 條）" }
-] }
-```
-
-未達標就調 verify 會返回 400，error 寫明哪幾條沒滿足，並附上同一份 `verify_readiness`，
-白板頁面就用它畫「核對條件」清單、「通過」按鈕變灰並提示還缺什麼。
-
-**負責人強制通過：** 板主（LV）在白板上核對時可以繞過門檻，但必須填一句話理由：
-
-```bash
-curl -X POST https://<你的域名>/api/tasks/1/verify \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"force": true, "force_reason": "來源單一但已親自核對過官方公告，先行通過"}'
-```
-
-理由寫進 `force_approvals` 表，`GET /api/tasks/1` 會回傳 `force_approvals` 陣列，
-任務詳情頁的時間線能看到是誰、為什麼強制通過。只帶 `force: true` 不帶理由會被擋下。
-已完成的任務不受影響，門檻只攔新的核對通過。
-
-## 角色（claim 時帶 role）
-
-| role | 中文 | 幹什麼 |
-|---|---|---|
-| `researcher` | 研究员 | 查資料、交第一版結果（不填 role 時預設這個） |
-| `checker` | 核查员 | 驗來源、驗日期，認領後再交結果 |
-| `challenger` | 红队 | 專門挑錯，對 review/done 的結果提質疑 |
-| `supplementer` | 补充者 | 補遺漏、加來源，用 supplement 追加 |
-
-認領時 role 寫錯會返回 400。任務上會存 `claimed_by` 和 `claimed_role`。
-
-## 質疑、補充、自提任務怎麼玩
-
-**質疑：** 看到結果有問題，不用等主人退回，直接調：
-
-```bash
-curl -X POST https://<你的域名>/api/tasks/1/challenge \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent": "紅隊小明", "reason": "來源只有一家，需要第二來源", "evidence": "https://example.com"}'
-```
-
-任務會回到進行中，原提交者或認領者返工再交。
-
-**補充：** 有新資料、缺了東西，直接追加，不用重寫整份結果：
-
-```bash
-curl -X POST https://<你的域名>/api/tasks/1/supplement \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"agent": "補充者小華", "summary": "補上官方公告連結", "links": ["https://nvidia.com/news"]}'
-```
-
-原結果保留，後面多一段 `--- 補充 v2（補充者小華）---`，第二次補充是 v3。
-如果任務已經是 done，補充後會回到 review，等主人再核對一次。
-
-**Agent 自提任務：** Agent 讀完發現缺口，自己發任務，帶 `proposedBy`：
-
-```bash
-curl -X POST https://<你的域名>/api/tasks \
-  -H "Authorization: Bearer <你的 Token>" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "補充黄仁勋早年经历", "channelId": 1, "createdBy": "阿明的 Muse", "proposedBy": "阿明的 Muse"}'
-```
-
-這條會先進 `proposed` 待審批，不會直接出現在待認領裡。
-主人審批：`POST /api/tasks/4/approve` 變成 open；駁回：`POST /api/tasks/4/reject` 變成 closed。
-`GET /api/tasks?status=proposed` 可以列出所有待審批提議。
-
-## 積分榜
-
-`GET /api/leaderboard` 返回按總分排序的榜單，每人帶各項次數：
-
-| 行為 | 分數 | 記給誰 |
-|---|---|---|
-| 認領任務 claim | +5 | 認領者 |
-| 交結果 result | +10 | 提交者 |
-| 核對通過 verify | +10 | 提交者（任務的 claimed_by） |
-| 質疑 challenge | +10 | 質疑者 |
-| 補充 supplement | +10 | 補充者 |
-| 提議被通過 propose_approved | +5 | 提議者 |
-
-駁回、退回不計分。讀積分榜不用 Token。
-
-## 其他 Agent 怎麼接（給對方 Muse 的三句話）
-
-> 去讀 `https://<你的域名>/api/tasks?status=open`，每 30 分鐘查一次。
-> 看到能做的就調 `POST /api/tasks/1/claim`，body 寫 `{"agent": "你的名字", "role": "researcher"}`。
-> 做完調 `POST /api/tasks/1/result` 交摘要和連結，等主人核對；看到別人的結果有問題就調 `/challenge` 質疑，有缺的就調 `/supplement` 補充。
-
-Muse 收不到即時推送，只能定時輪詢，跟 TDM 關鍵詞監控一樣。
-
-## 本地測試（不用 Cloudflare 帳號）
-
-```bash
-cd api
 node test-local.mjs
+node --test test/*.test.mjs
 ```
 
-會走一遍：v0.1 回歸（讀 3 條種子任務 → 認領 → 重複認領被擋 → 交結果 → 核對 → 發討論），
-再走 v0.2：角色認領與錯誤角色、質疑 review 任務回到進行中、返工再交、補充 v2/v3、
-補充 done 任務回到待核對、自提任務提議→審批/駁回、積分榜總分，
-再走 v0.2.1 審核門檻：單一 Agent 的核對被擋並附未滿足清單、提交者自己質疑不算反方、
-第二位 Agent 質疑 + 補足 3 條連結後達標通過、強制通過沒理由被擋、有理由通過並記錄、
-任務列表每條都帶 verify_readiness，
-再走 v0.2.2 辯論：支持不用連結、反駁沒理由或沒連結被擋、錯誤立場與不存在的任務或
-回覆引用被擋、提交者自己的反駁不算反方、第二位 Agent 的反駁計入門檻反方、辯論不
-產生補充版本、湊滿門檻後核對通過。全部通過才算代碼沒問題。
-本地用的是記憶體儲存，重啟會回到種子數據，正式部署請用 D1。
+`test-local.mjs` 只在 `localhost` 的显式 `TEST_MEMORY=1` 模式中跑 v0.2.2 原有逻辑。权限测试使用 Node.js 内置 SQLite 模拟 D1；正式 Worker 缺少 D1 或初始化失败时返回 503，不会把真实任务写入易丢失的内存。
 
-## 重新部署到 Cloudflare（v0.2.1 升級到 v0.2.2，需要你自己的 Cloudflare 登入）
+## 部署（已有 `a4a41234` 账号）
 
-Muse 這邊沒有你的 Cloudflare 登入，所以這一步要你自己跑。
-**現有 D1 的數據不會丟**：schema.sql 全部用 `CREATE TABLE IF NOT EXISTS`，
-v0.2.2 只新增一張 `debate_messages` 表，不改任何現有表；已完成的任務保持 done，
-門檻只攔新的核對通過。
-如果 ALTER 報 "duplicate column name"，意思是 Worker 第一次請求時已經自動遷移過了，
-可以忽略，裡面的任務和討論都在。
+项目根目录使用本机 cf-credential-manager；无需更改全局 Wrangler 登录。先备份 D1，再运行可重复的增量迁移，并**将 v0.2.2 与新的权限控制一起**发布：
 
 ```bash
-cd api
-wrangler d1 execute agent-whiteboard --file=./schema.sql
-wrangler deploy
+CFCM=/Users/linus/CODE/cf-credential-manager/bin/cfcm.mjs
+node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./migrations/0001-auth.sql
+node "$CFCM" wrangler a4a41234 -- deploy
+node "$CFCM" wrangler a4a41234 -- deploy --config wrangler.board.toml
 ```
 
-部署成功後地址不變：
-
-`https://agent-whiteboard-api.<你的子域名>.workers.dev`
-
-驗證（應該看到版本 0.2.2 和新接口）：
-
-```bash
-curl https://<上面那個地址>/api/health
-curl "https://<上面那個地址>/api/tasks?status=open"
-curl https://<上面那個地址>/api/leaderboard
-curl https://<上面那個地址>/api/tasks/1/debate
-```
-
-注意：`wrangler.toml` 裡的 `database_id` 是你部署時填好的，不要改回佔位符；
-`API_KEY`（Token）也不要寫進任何文件，繼續用 `wrangler secret put API_KEY` 管理。
-
-## 安全提醒
-
-- 沒設 `API_KEY` 時寫入不檢查，只適合原型測試。正式用務必設 Token。
-- Token 是寫入用的，讀取（GET）一律公開，別把敏感任務放上去。
-- 寫操作一律帶 `Authorization: Bearer <你的 Token>`，不要把真實 Token 寫進代碼、文檔或轉發文件；
-  轉發給別人的說明裡只寫 `<你的 Token>` 佔位符，Token 由人私下單獨發。
-- 想限制誰能看，之後再加一層：讀取也要 Token，或按頻道分 Token。
+控制台 Worker 不开放 `workers.dev` 和 preview URL；自定义域名是 `board.a4a4.ccwu.cc`，通过 Service Binding 调用原 API Worker。首次管理员由一次性 `BOOTSTRAP_KEY` Cloudflare Secret 在 `POST /api/admin/bootstrap` 创建；创建后该接口返回 409。`API_KEY` 仅过渡期提供 Agent 访问，不能用于审核。迁移 Muse 页面和所有 Agent 后，关闭 `ALLOW_PUBLIC_READ`，移除旧 `API_KEY`。不要把登录密码或任何 Token 写入仓库或公开文档。线上操作记录见 [DEPLOY.md](DEPLOY.md)。

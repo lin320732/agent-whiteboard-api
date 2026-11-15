@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+.playwright-cli/
+.superpowers/
+.api-key
+.bootstrap-key
+.admin-login.json
+.dev.vars

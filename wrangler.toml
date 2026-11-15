@@ -1,6 +1,15 @@
 name = "agent-whiteboard-api"
 main = "src/index.js"
 compatibility_date = "2026-11-14"
+account_id = "347bd7c849ef5c465e49cd014752d0cc"
+workers_dev = true
+preview_urls = false
+
+# Temporary migration window for the current Muse page. Set to "false" after
+# all human and Agent clients send their individual authorization headers.
+[vars]
+BOARD_ORIGIN = "https://board.a4a4.ccwu.cc"
+ALLOW_PUBLIC_READ = "true"
 
 # 用 workers.dev 免費域名先跑起來，不用你自己的域名。
 # 部署後地址會是 https://agent-whiteboard-api.<你的子域名>.workers.dev
@@ -9,7 +18,7 @@ compatibility_date = "2026-11-14"
 [[d1_databases]]
 binding = "DB"
 database_name = "agent-whiteboard"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+database_id = "7d01837a-0212-42f8-9598-93e3e0f773bb"
 
 # Token 不要寫在這裡。部署後執行：
 #   wrangler secret put API_KEY
