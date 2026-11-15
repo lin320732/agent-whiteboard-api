@@ -48,6 +48,7 @@ async page => {
   if (!await thread.locator("#debate-12 .conversation-speaker").getByText("<img src=x onerror=alert(1)> Agent").count()) throw Error("名字被错误解析");
   if (!await thread.locator("#debate-12").getByText("不同意 <script>alert(1)</script>").count() || await thread.locator("img,script").count()) throw Error("不可信内容被当成 HTML 执行");
   if (!await thread.getByText("v2", { exact: false }).count() || !await thread.getByText("质疑", { exact: false }).count()) throw Error("质疑或补充类型没有标示");
+  if (!await thread.locator("#debate-12 .conversation-source-label").getByText("证据").count() || !await thread.locator('[data-kind="supplement"] .conversation-source-label').getByText("来源").count()) throw Error("对话里的证据和来源没有标示");
   await thread.locator('.link-card[href="https://example.com/evidence"]').waitFor({ timeout: 3000 });
   if (!await thread.locator('.plain-link[href="https://example.com/source"]').count()) throw Error("对话里的来源链接丢失");
   await page.setViewportSize({ width: 390, height: 844 });
@@ -55,5 +56,25 @@ async page => {
   await page.locator("#taskList .task-item").nth(1).click();
   await page.locator("#taskDetail h3").getByText("空对话").waitFor();
   if (!await page.locator("#taskDetail .conversation-empty").count()) throw Error("没有发言时未显示空状态");
-  return { conversation: "passed", quotedAgent: "passed", safeMarkup: "passed", mobileWidth: "passed" };
+  await page.locator("#taskList .task-item").first().click();
+  await page.locator("#debate-11").waitFor();
+  const select = page.locator('#debateForm select[name="reply_to"]');
+  const preview = page.locator("#debateForm .reply-preview");
+  await select.selectOption("12");
+  if (!await preview.getByText("<img src=x onerror=alert(1)> Agent", { exact: false }).count() || !await preview.getByText("不同意 <script>alert(1)</script>", { exact: false }).count() || await preview.getAttribute("role") !== "status") throw Error("选择回复对象后没有显示安全的引用预览");
+  await select.selectOption("");
+  if (await preview.isVisible()) throw Error("取消引用后预览仍显示");
+  await page.locator("#debate-11").getByRole("button", { name: "回复 Agent A" }).click({ timeout: 3000 });
+  if (await select.inputValue() !== "11" || !await preview.getByText("Agent A", { exact: false }).count() || !await preview.getByText("第一条观点", { exact: false }).count()) throw Error("发言旁的回复按钮没有选中对应 Agent");
+  await page.locator('#debateForm select[name="stance"]').selectOption("补充");
+  await page.locator('#debateForm textarea[name="content"]').fill("新的回复");
+  await page.locator("#debateForm").getByRole("button", { name: "发表观点" }).click();
+  await page.locator("#debate-16 .reply-reference").getByText("Agent A", { exact: false }).waitFor();
+  if (submitted?.reply_to !== 11 || submitted?.content !== "新的回复" || submitted?.stance !== "补充") throw Error("发表回复没有带正确的 reply_to");
+  role = "viewer";
+  await page.reload();
+  await page.locator("#taskList .task-item").first().click();
+  await page.locator("#debate-11").waitFor();
+  if (await page.locator("#debateForm, #taskDetail .conversation-message .text-button").count()) throw Error("只读成员看到回复入口");
+  return { conversation: "passed", quotedAgent: "passed", safeMarkup: "passed", mobileWidth: "passed", replySelection: "passed", postedReply: submitted.reply_to, viewer: "passed" };
 }

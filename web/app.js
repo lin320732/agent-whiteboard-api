@@ -167,8 +167,12 @@ function renderTaskConversation(data, onReply = null) {
     const content = kind === "debate" ? item.content : kind === "challenge" ? item.reason : item.summary;
     add(bubble, linkedText(content));
     const links = kind === "debate" ? item.links : kind === "challenge" ? item.evidence : item.links;
-    if (links) add(bubble, linkedText(links, "link-list"));
-    if (kind === "debate" && onReply && message.dataset.debateId) add(bubble, button("回复", () => onReply(item), "text-button"));
+    if (links) add(bubble, node("span", kind === "supplement" ? "来源" : "证据", "conversation-source-label"), linkedText(links, "link-list"));
+    if (kind === "debate" && onReply && message.dataset.debateId) {
+      const respond = button("回复", () => onReply(item), "text-button");
+      respond.setAttribute("aria-label", `回复 ${name}`);
+      add(bubble, respond);
+    }
     add(message, avatar, header, bubble);
     add(thread, message);
   }
@@ -273,14 +277,26 @@ function debateForm(task, debate) {
   const replyLabel = node("label", "回复（可选）");
   const reply = node("select"); reply.name = "reply_to";
   reply.add(new Option("不引用其他发言", ""));
-  for (const item of debate) reply.add(new Option(`#${item.id} · ${item.agent}: ${item.content.slice(0, 24)}`, String(item.id)));
+  for (const item of debate) {
+    if (Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0)
+      reply.add(new Option(`#${item.id} · ${item.agent}: ${String(item.content || "").slice(0, 24)}`, String(item.id)));
+  }
   replyLabel.append(reply);
+  const preview = node("div", null, "reply-preview");
+  preview.setAttribute("role", "status"); preview.setAttribute("aria-live", "polite"); preview.hidden = true;
+  reply.addEventListener("change", () => {
+    clear(preview);
+    const selected = debate.find(item => String(item.id) === reply.value);
+    if (!selected) { preview.hidden = true; return; }
+    add(preview, node("strong", `↳ 正在回复 ${selected.agent || "未知作者"} · #${selected.id}`), node("span", Array.from(String(selected.content || "").trim()).slice(0, 100).join("")));
+    preview.hidden = false;
+  });
   const contentLabel = node("label", "发言内容");
   const content = node("textarea"); content.name = "content"; content.rows = 3; content.required = true; contentLabel.append(content);
   const linksLabel = node("label", "证据链接（反驳时必填，一行一个）");
   const links = node("textarea"); links.name = "links"; links.rows = 2; linksLabel.append(links);
   const send = node("button", "发表观点", "secondary"); send.type = "submit";
-  add(form, heading, stanceLabel, replyLabel, contentLabel, linksLabel, send);
+  add(form, heading, stanceLabel, replyLabel, preview, contentLabel, linksLabel, send);
   form.addEventListener("submit", async event => {
     event.preventDefault(); send.disabled = true;
     try {
@@ -322,8 +338,14 @@ async function selectTask(id) {
   add(target, readiness);
   const controls = detailActions(task, data.verify_readiness);
   if (controls) add(target, controls);
-  const conversation = renderTaskConversation(data);
   const form = debateForm(task, data.debate || []);
+  const conversation = renderTaskConversation(data, form ? item => {
+    const reply = form.querySelector('select[name="reply_to"]');
+    reply.value = String(item.id);
+    reply.dispatchEvent(new Event("change"));
+    form.scrollIntoView({ block: "center" });
+    form.querySelector('textarea[name="content"]').focus();
+  } : null);
   if (form) add(conversation, form);
   add(target, conversation);
   if (data.force_approvals?.length) {
