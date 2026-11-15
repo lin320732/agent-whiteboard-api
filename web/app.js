@@ -317,6 +317,38 @@ function confirmAccountAction(item, message, label, onConfirm, destructive = fal
   item.append(box);
   box.scrollIntoView({ block: "nearest" });
 }
+function editAccountName(item, kind, person) {
+  item.querySelector(".account-confirm")?.remove();
+  const form = node("form", null, "account-confirm account-edit");
+  const label = node("label", "显示名称");
+  const input = node("input");
+  input.name = "name"; input.maxLength = 80; input.required = true; input.value = person.name;
+  label.append(input);
+  const actions = node("div", null, "action-row");
+  const save = node("button", "保存名称", "primary"); save.type = "submit";
+  add(actions, save, button("取消", () => form.remove()));
+  const error = node("p", "", "error"); error.setAttribute("role", "alert");
+  add(form, label, node("p", "只改显示名称；账号、令牌、已认领任务和积分保持不变。", "muted"), actions, error);
+  form.addEventListener("submit", async event => {
+    event.preventDefault(); save.disabled = true; error.textContent = "";
+    try {
+      const changed = await api(`/api/admin/${kind}/${person.id}/name`, "POST", { name: input.value });
+      if (kind === "users" && person.id === state.user.id) {
+        state.user.name = changed.name;
+        $("signedInAs").textContent = `${changed.name} · ${roleText[state.user.role] || state.user.role}`;
+      }
+      const issued = $("issuedSecrets");
+      if (issued.dataset.accountId === String(person.id)) {
+        const heading = issued.querySelector("strong");
+        if (heading) heading.textContent = `${changed.name} 的凭据（仅显示一次，请私下交给本人）`;
+      }
+      await refreshAccounts(); notify("显示名称已更新");
+    } catch (cause) { error.textContent = cause.message; }
+    finally { save.disabled = false; }
+  });
+  item.append(form);
+  input.focus(); form.scrollIntoView({ block: "nearest" });
+}
 async function refreshAccounts() {
   const [users, agents] = await Promise.all([api("/api/admin/users"), api("/api/admin/agents")]);
   for (const [kind, rows, targetId] of [["users", users.accounts, "users"], ["agents", agents.accounts, "agents"]]) {
@@ -327,8 +359,9 @@ async function refreshAccounts() {
       const info = node("div");
       add(info, node("strong", `${person.name} · ${roleText[person.role] || person.role}`), node("span", `${person.username}${person.active ? "" : " · 已停用"}`));
       add(row, info);
+      const controls = node("div", null, "action-row");
+      add(controls, button("改名", () => editAccountName(item, kind, person)));
       if (person.active && person.id !== state.user.id) {
-        const controls = node("div", null, "action-row");
         add(controls, button("轮换", () => confirmAccountAction(item, `轮换 ${person.name} 的凭据？旧凭据将立即失效。`, "确认轮换", async () => {
           const changed = await api(`/api/admin/${kind}/${person.id}/rotate`, "POST", {});
           showSecrets({ ...changed, name: person.name }); notify("新凭据已签发");
@@ -340,8 +373,8 @@ async function refreshAccounts() {
           }
           await refreshAccounts(); notify("账号已停用");
         }, true), "danger"));
-        add(row, controls);
       }
+      add(row, controls);
       add(item, row);
       add(target, item);
     }
