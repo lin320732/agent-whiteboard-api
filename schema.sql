@@ -86,6 +86,30 @@ CREATE TABLE IF NOT EXISTS debate_messages (
   created_at TEXT
 );
 
--- 已有庫升級用（新庫不需要這兩行；已遷移過會報 duplicate column，可忽略）：
-ALTER TABLE tasks ADD COLUMN claimed_role TEXT;
-ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT '';
+-- 手工账号、个人令牌与网页登录会话。令牌原文绝不存入 D1。
+CREATE TABLE IF NOT EXISTS principals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('human','agent')),
+  role TEXT NOT NULL CHECK(role IN ('admin','publisher','viewer','agent')),
+  password_hash TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS api_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  principal_id INTEGER NOT NULL,
+  scope TEXT NOT NULL CHECK(scope IN ('publisher','agent')),
+  token_hash TEXT NOT NULL UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  principal_id INTEGER NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- 旧版 tasks 缺字段时由 Worker dbInit 单独 ALTER；本文件可重复执行。

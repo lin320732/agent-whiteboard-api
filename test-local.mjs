@@ -2,7 +2,7 @@
 // node test-local.mjs
 import worker from "./src/index.js";
 
-const env = {};
+const env = { TEST_MEMORY: "1" };
 async function call(method, path, body, token) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;

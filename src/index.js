@@ -1,3 +1,5 @@
+import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
+
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
 // 其他 Muse / Agent 只要拿到網址 + Token，就能讀寫同一份任務。
@@ -64,7 +66,7 @@ const POINTS = {
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...CORS },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
   });
 }
 function err(message, status = 400) { return json({ ok: false, error: message }, status); }
@@ -94,11 +96,11 @@ function computeReadiness(task, challenges, supplements, eventAgents, debate) {
   for (const a of eventAgents || []) if (a) agents.add(a);
   for (const c of challenges || []) if (c.agent) agents.add(c.agent);
   for (const s of supplements || []) if (s.agent) agents.add(s.agent);
-  for (const d of debate || []) if (d.agent) agents.add(d.agent);
+  for (const d of debate || []) if (d.agent && d.role !== "human") agents.add(d.agent);
   const submitter = task.claimed_by || "";
   const challengers = [...new Set((challenges || []).filter(c => c.agent && c.agent !== submitter).map(c => c.agent))];
   // v0.2.2：辯論裡的反駁（發言者與提交者不同）也算反方
-  const rebutters = [...new Set((debate || []).filter(d => d.stance === "反駁" && d.agent && d.agent !== submitter).map(d => d.agent))];
+  const rebutters = [...new Set((debate || []).filter(d => d.role !== "human" && d.stance === "反駁" && d.agent && d.agent !== submitter).map(d => d.agent))];
   const contra = [...new Set([...challengers, ...rebutters])];
   const links = new Set([...extractUrls(task.result_links), ...(supplements || []).flatMap(s => extractUrls(s.links))]);
   const checks = [
@@ -163,8 +165,10 @@ let mem = seedMemory();
 
 // ---- D1 幫助函數 ----
 async function tryAlter(env, sql) {
-  // 已有庫升級用：欄位已存在時會報錯，忽略即可（新庫建表時已有該欄位）
-  try { await env.DB.exec(sql); } catch { /* duplicate column: already migrated */ }
+  try { await env.DB.exec(sql); }
+  catch (error) {
+    if (!/duplicate column name/i.test(String(error?.message || error))) throw error;
+  }
 }
 
 async function dbInit(env) {
@@ -180,6 +184,7 @@ async function dbInit(env) {
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
+  await initAuthSchema(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
@@ -219,13 +224,17 @@ function buildLeaderboard(eventRows) {
   return Object.values(byAgent).sort((a, b) => b.points - a.points || (a.agent < b.agent ? -1 : 1));
 }
 
-// ---- 認證：只有設定了 API_KEY 才檢查寫入；讀取一律公開 ----
-function needAuth(request, env) {
-  const key = env.API_KEY || env.AGENT_API_KEY || "";
-  if (!key) return null; // 未設定 = 原型模式，全部放行（部署時務必設定）
-  const h = request.headers.get("Authorization") || "";
-  if (h === `Bearer ${key}`) return null;
-  return err("未授權：請帶 Authorization: Bearer <你的 Token>", 401);
+// Access control is enforced once, before any business route. No route accepts a
+// request-body identity as proof of permission.
+function routeAction(method, path) {
+  if (method === "GET") return "read";
+  if (method !== "POST") return null;
+  if (path === "/api/channels") return "channel:create";
+  if (path === "/api/tasks") return "task:create";
+  if (path === "/api/messages") return "message:post";
+  if (/^\/api\/tasks\/\d+\/debate$/.test(path)) return "debate";
+  const task = path.match(/^\/api\/tasks\/\d+\/(claim|result|verify|reopen|challenge|supplement|approve|reject)$/);
+  return task?.[1] || null;
 }
 
 const ENDPOINTS = [
@@ -247,13 +256,24 @@ export default {
     const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     const useDb = await dbInit(env).catch(() => false);
+    if (!useDb && !(env.TEST_MEMORY === "1" && ["localhost", "127.0.0.1"].includes(url.hostname))) return err("D1 暫時不可用，請稍後再試", 503);
 
-    // 健康檢查 / 說明頁
+    // 健康檢查公開；業務資料和寫入均由 API Worker 逐請求校驗。
     if (path === "/" || path === "/api/health") {
       return json({ ok: true, service: "agent-whiteboard-api", version: VERSION, storage: useDb ? "d1" : "memory (prototype only)", endpoints: ENDPOINTS });
     }
 
-    // ---- 積分榜（公開讀）----
+    const principal = useDb ? await principalFor(request, env) : { kind: "test", role: "admin", name: "Local Test" };
+    if (useDb) {
+      const handled = await authRoute(request, env, principal, path);
+      if (handled) return handled;
+    }
+    const action = routeAction(request.method, path);
+    if (action && !(action === "read" && env.ALLOW_PUBLIC_READ === "true") && !permit(principal, action))
+      return err(principal ? "權限不足" : "請先登入或帶個人 Token", principal ? 403 : 401);
+    if (action && !originAllowed(request, env, principal)) return err("來源不符", 403);
+
+    // ---- 積分榜 ----
     if (path === "/api/leaderboard" && request.method === "GET") {
       let rows;
       if (useDb) {
@@ -271,7 +291,6 @@ export default {
       return json({ ok: true, channels: mem.channels });
     }
     if (path === "/api/channels" && request.method === "POST") {
-      const a = needAuth(request, env); if (a) return a;
       const b = await request.json().catch(() => ({}));
       if (!b.name) return err("缺少 name");
       if (useDb) { const r = await env.DB.prepare("INSERT INTO channels (name, topic, created_at) VALUES (?, ?, ?)").bind(b.name, b.topic || "", new Date().toISOString()).run(); return json({ ok: true, id: r.meta.last_row_id }, 201); }
@@ -304,20 +323,21 @@ export default {
       return json({ ok: true, tasks: list });
     }
     if (path === "/api/tasks" && request.method === "POST") {
-      const a = needAuth(request, env); if (a) return a;
       const b = await request.json().catch(() => ({}));
       if (!b.title) return err("缺少 title");
       const now = new Date().toISOString();
-      const proposedBy = b.proposedBy || "";
-      // Agent 自提任務：帶 proposedBy 且提議者是 Agent（名字含 Muse/Agent 等，或
-      // createdBy 就是提議者本人）時，先進 proposed，待審批；人類直接發任務仍是 open
-      const isProposed = proposedBy && (isAgentName(b.createdBy) || isAgentName(proposedBy) || !b.createdBy);
+      const isTest = principal.kind === "test";
+      const isProposed = isTest
+        ? !!(b.proposedBy && (isAgentName(b.createdBy) || isAgentName(b.proposedBy) || !b.createdBy))
+        : principal.kind === "agent" || principal.kind === "legacy";
+      const proposedBy = isTest ? (b.proposedBy || "") : isProposed ? actorName(principal, b) : "";
+      const createdBy = isTest ? (b.createdBy || proposedBy) : actorName(principal, b);
       const status = isProposed ? "proposed" : "open";
       if (useDb) {
-        const r = await env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", b.createdBy || proposedBy || "", proposedBy, status, now, now).run();
+        const r = await env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, now, now).run();
         return json({ ok: true, id: r.meta.last_row_id, status }, 201);
       }
-      const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: b.createdBy || proposedBy || "", proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
+      const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: createdBy, proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
       mem.tasks.push(t); return json({ ok: true, id: t.id, status }, 201);
     }
 
@@ -359,8 +379,9 @@ export default {
         return json({ ok: true, debate: rows });
       }
       if (request.method === "POST") {
-        const a = needAuth(request, env); if (a) return a;
         const b = await request.json().catch(() => ({}));
+        const name = actorName(principal, b);
+        const speakerRole = principal.kind === "test" ? (b.role || "agent") : principal.kind === "human" ? "human" : "agent";
         const now = new Date().toISOString();
         const stance = normalizeStance(b.stance);
         const replyTo = b.reply_to ?? b.replyTo ?? null;
@@ -369,7 +390,7 @@ export default {
           const cur = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
           if (!cur) return err("任務不存在", 404);
           if (cur.status === "closed") return err("已關閉的任務不能辯論");
-          if (!b.agent) return err("缺少 agent（發言的 Agent 名字）");
+          if (principal.kind === "test" && !b.agent) return err("缺少 agent（發言的 Agent 名字）");
           if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
           if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
           const links = extractUrls(linksToString(b.links));
@@ -378,20 +399,20 @@ export default {
             const target = await env.DB.prepare("SELECT id FROM debate_messages WHERE id=? AND task_id=?").bind(Number(replyTo), id).first();
             if (!target) return err("reply_to 指定的辯論訊息不存在");
           }
-          const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, b.agent, b.role || "agent", stance, String(b.content).trim(), links.join("\n"), replyTo != null ? Number(replyTo) : null, now).run();
+          const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, name, speakerRole, stance, String(b.content).trim(), links.join("\n"), replyTo != null ? Number(replyTo) : null, now).run();
           const message = await env.DB.prepare("SELECT * FROM debate_messages WHERE id=?").bind(r.meta.last_row_id).first();
           return json({ ok: true, message }, 201);
         }
         const t = mem.tasks.find(x => x.id === id);
         if (!t) return err("任務不存在", 404);
         if (t.status === "closed") return err("已關閉的任務不能辯論");
-        if (!b.agent) return err("缺少 agent（發言的 Agent 名字）");
+        if (principal.kind === "test" && !b.agent) return err("缺少 agent（發言的 Agent 名字）");
         if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
         if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
         const links = extractUrls(linksToString(b.links));
         if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
         if (replyTo != null && !mem.debate.some(x => x.id === Number(replyTo) && x.task_id === id)) return err("reply_to 指定的辯論訊息不存在");
-        const message = { id: mem.nextDebate++, task_id: id, agent: b.agent, role: b.role || "agent", stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: replyTo != null ? Number(replyTo) : null, created_at: now };
+        const message = { id: mem.nextDebate++, task_id: id, agent: name, role: speakerRole, stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: replyTo != null ? Number(replyTo) : null, created_at: now };
         mem.debate.push(message);
         return json({ ok: true, message }, 201);
       }
@@ -400,9 +421,9 @@ export default {
     // ---- 單個任務動作 ----
     const m = path.match(/^\/api\/tasks\/(\d+)\/(claim|result|verify|reopen|challenge|supplement|approve|reject)$/);
     if (m && request.method === "POST") {
-      const a = needAuth(request, env); if (a) return a;
       const id = Number(m[1]), action = m[2];
       const b = await request.json().catch(() => ({}));
+      const name = actorName(principal, b);
       const now = new Date().toISOString();
 
       if (useDb) {
@@ -411,13 +432,14 @@ export default {
 
         if (action === "claim") {
           if (cur.status !== "open") return err(`只能認領待認領的任務，現在是 ${cur.status}`);
-          if (!b.agent) return err("缺少 agent（認領的 Agent 名字）");
+          if (principal.kind === "test" && !b.agent) return err("缺少 agent（認領的 Agent 名字）");
           const role = b.role || "researcher";
           if (!(role in ROLES)) return err("role 必須是 researcher / checker / challenger / supplementer");
-          await env.DB.prepare("UPDATE tasks SET status='in_progress', claimed_by=?, claimed_role=?, updated_at=? WHERE id=?").bind(b.agent, role, now, id).run();
-          await recordEvent(env, true, b.agent, "claim", id);
+          await env.DB.prepare("UPDATE tasks SET status='in_progress', claimed_by=?, claimed_role=?, updated_at=? WHERE id=?").bind(name, role, now, id).run();
+          await recordEvent(env, true, name, "claim", id);
         } else if (action === "result") {
           if (cur.status !== "in_progress") return err(`只能對進行中的任務交結果，現在是 ${cur.status}`);
+          if (principal.kind === "agent" && cur.claimed_by !== name) return err("只有認領者能提交結果", 403);
           const links = linksToString(b.links ?? b.result_links);
           await env.DB.prepare("UPDATE tasks SET status='review', result_summary=?, result_links=?, updated_at=? WHERE id=?").bind(b.summary || b.result_summary || "", links, now, id).run();
           await recordEvent(env, true, cur.claimed_by, "result", id);
@@ -432,7 +454,7 @@ export default {
             forceReason = String(b.force_reason || "").trim();
             if (!forceReason) return err("強制通過需要填寫一句話理由（force_reason）");
             forced = true;
-            await env.DB.prepare("INSERT INTO force_approvals (task_id, agent, reason, created_at) VALUES (?, ?, ?, ?)").bind(id, b.agent || b.by || "LV", forceReason, now).run();
+            await env.DB.prepare("INSERT INTO force_approvals (task_id, agent, reason, created_at) VALUES (?, ?, ?, ?)").bind(id, principal.kind === "test" ? (b.agent || b.by || "LV") : name, forceReason, now).run();
           }
           await env.DB.prepare("UPDATE tasks SET status='done', updated_at=? WHERE id=?").bind(now, id).run();
           await recordEvent(env, true, cur.claimed_by, "verify", id);
@@ -442,29 +464,29 @@ export default {
           await env.DB.prepare("UPDATE tasks SET status='open', claimed_by=NULL, claimed_role=NULL, updated_at=? WHERE id=?").bind(now, id).run();
         } else if (action === "challenge") {
           if (cur.status !== "review" && cur.status !== "done") return err(`只能質疑待核對或已完成的任務，現在是 ${cur.status}`);
-          if (!b.agent) return err("缺少 agent（質疑的 Agent 名字）");
+          if (principal.kind === "test" && !b.agent) return err("缺少 agent（質疑的 Agent 名字）");
           if (!b.reason) return err("缺少 reason（質疑的理由）");
           const evidence = linksToString(b.evidence);
-          const r = await env.DB.prepare("INSERT INTO challenges (task_id, agent, reason, evidence, created_at) VALUES (?, ?, ?, ?, ?)").bind(id, b.agent, b.reason, evidence, now).run();
+          const r = await env.DB.prepare("INSERT INTO challenges (task_id, agent, reason, evidence, created_at) VALUES (?, ?, ?, ?, ?)").bind(id, name, b.reason, evidence, now).run();
           await env.DB.prepare("UPDATE tasks SET status='in_progress', updated_at=? WHERE id=?").bind(now, id).run();
-          await recordEvent(env, true, b.agent, "challenge", id);
+          await recordEvent(env, true, name, "challenge", id);
           const t = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
           const challenge = await env.DB.prepare("SELECT * FROM challenges WHERE id=?").bind(r.meta.last_row_id).first();
           return json({ ok: true, task: t, challenge });
         } else if (action === "supplement") {
           if (cur.status !== "in_progress" && cur.status !== "review" && cur.status !== "done") return err(`只能對進行中、待核對或已完成的任務補充，現在是 ${cur.status}`);
-          if (!b.agent) return err("缺少 agent（補充的 Agent 名字）");
+          if (principal.kind === "test" && !b.agent) return err("缺少 agent（補充的 Agent 名字）");
           if (!b.summary) return err("缺少 summary（補充內容）");
           const prior = await env.DB.prepare("SELECT COUNT(*) AS n FROM supplements WHERE task_id=?").bind(id).first();
           const version = (prior ? prior.n : 0) + 2; // 原結果是 v1，第一次補充是 v2
           const links = [cur.result_links, linksToString(b.links)].filter(Boolean).join("\n");
           const summary = cur.result_summary
-            ? `${cur.result_summary}\n\n--- 補充 v${version}（${b.agent}）---\n${b.summary}`
+            ? `${cur.result_summary}\n\n--- 補充 v${version}（${name}）---\n${b.summary}`
             : b.summary;
           const newStatus = cur.status === "done" ? "review" : cur.status;
-          const r = await env.DB.prepare("INSERT INTO supplements (task_id, agent, summary, links, version, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, b.agent, b.summary, linksToString(b.links), version, now).run();
+          const r = await env.DB.prepare("INSERT INTO supplements (task_id, agent, summary, links, version, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, name, b.summary, linksToString(b.links), version, now).run();
           await env.DB.prepare("UPDATE tasks SET status=?, result_summary=?, result_links=?, updated_at=? WHERE id=?").bind(newStatus, summary, links, now, id).run();
-          await recordEvent(env, true, b.agent, "supplement", id);
+          await recordEvent(env, true, name, "supplement", id);
           const t = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
           const supplement = await env.DB.prepare("SELECT * FROM supplements WHERE id=?").bind(r.meta.last_row_id).first();
           return json({ ok: true, task: t, supplement });
@@ -564,13 +586,14 @@ export default {
       return json({ ok: true, messages: list });
     }
     if (path === "/api/messages" && request.method === "POST") {
-      const a = needAuth(request, env); if (a) return a;
       const b = await request.json().catch(() => ({}));
       if (!b.text) return err("缺少 text");
-      if (!b.author) return err("缺少 author（發言的人或 Agent 名字）");
+      if (principal.kind === "test" && !b.author) return err("缺少 author（發言的人或 Agent 名字）");
+      const author = actorName(principal, b);
+      const role = principal.kind === "test" ? (b.role || "agent") : principal.kind === "human" ? "human" : "agent";
       const now = new Date().toISOString();
-      if (useDb) { const r = await env.DB.prepare("INSERT INTO messages (channel_id, author, role, text, created_at) VALUES (?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.author, b.role || "agent", b.text, now).run(); return json({ ok: true, id: r.meta.last_row_id }, 201); }
-      const msg = { id: mem.nextMessage++, channel_id: b.channelId ?? null, author: b.author, role: b.role || "agent", text: b.text, created_at: now };
+      if (useDb) { const r = await env.DB.prepare("INSERT INTO messages (channel_id, author, role, text, created_at) VALUES (?, ?, ?, ?, ?)").bind(b.channelId ?? null, author, role, b.text, now).run(); return json({ ok: true, id: r.meta.last_row_id }, 201); }
+      const msg = { id: mem.nextMessage++, channel_id: b.channelId ?? null, author, role, text: b.text, created_at: now };
       mem.messages.push(msg); return json({ ok: true, id: msg.id }, 201);
     }
 
