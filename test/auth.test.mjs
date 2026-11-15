@@ -70,6 +70,10 @@ test("remote migration is additive and can be applied twice", async () => {
   const migration = readFileSync(new URL("../migrations/0001-auth.sql", import.meta.url), "utf8");
   DB.sqlite.exec(migration);
   DB.sqlite.exec(migration);
+  const labels = readFileSync(new URL("../migrations/0002-display-names.sql", import.meta.url), "utf8");
+  DB.sqlite.exec(labels);
+  DB.sqlite.exec(labels);
+  assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM principal_labels").get().n, 0);
   assert.equal(DB.sqlite.prepare("SELECT title FROM tasks WHERE id=42").get().title, "kept");
   assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM sessions").get().n, 0);
 });
@@ -129,6 +133,73 @@ test("human sessions and per-agent credentials enforce identity and roles", asyn
   const logout = await request("POST", "/api/auth/logout", {}, auth);
   assert.equal(logout.status, 200);
   assert.equal((await request("GET", "/api/tasks", undefined, { Cookie: cookie })).status, 401);
+});
+
+test("display-name edits preserve identity, claims, scores and issued credentials", async () => {
+  const { request, DB } = setup();
+  const { cookie } = await owner(request);
+  const admin = { Cookie: cookie, ...boardOrigin };
+  const created = await request("POST", "/api/admin/agents", { username: "muse-new", name: "Old Muse" }, admin);
+  assert.equal(created.status, 201);
+  const agent = { Authorization: `Bearer ${created.data.token}` };
+  assert.equal((await request("POST", "/api/tasks/1/claim", { role: "researcher" }, agent)).status, 200);
+  assert.equal((await request("POST", "/api/messages", { channelId: 1, text: "同步进度" }, agent)).status, 201);
+  assert.equal((await request("POST", "/api/tasks/1/debate", { stance: "支持", content: "同意" }, agent)).status, 201);
+  const rename = await request("POST", `/api/admin/agents/${created.data.id}/name`, { name: "  New Muse  " }, admin);
+  assert.equal(rename.status, 200);
+  assert.deepEqual(rename.data, { ok: true, id: created.data.id, name: "New Muse" });
+  assert.equal(DB.sqlite.prepare("SELECT name FROM principals WHERE id=?").get(created.data.id).name, "Old Muse");
+  assert.equal(DB.sqlite.prepare("SELECT claimed_by FROM tasks WHERE id=1").get().claimed_by, "Old Muse");
+  assert.equal((await request("GET", "/api/auth/me", undefined, agent)).data.user.name, "New Muse");
+  const listed = await request("GET", "/api/admin/agents", undefined, admin);
+  assert.equal(listed.data.accounts.find(x => x.id === created.data.id).name, "New Muse");
+  const before = await request("GET", "/api/tasks/1", undefined, agent);
+  assert.equal(before.data.task.claimed_by, "New Muse");
+  assert.match(before.data.verify_readiness.checks[0].detail, /New Muse/);
+  assert.equal((await request("GET", "/api/tasks", undefined, agent)).data.tasks.find(t => t.id === 1).claimed_by, "New Muse");
+  assert.equal((await request("GET", "/api/messages?channelId=1", undefined, agent)).data.messages[0].author, "New Muse");
+  assert.equal((await request("GET", "/api/tasks/1/debate", undefined, agent)).data.debate[0].agent, "New Muse");
+  assert.equal((await request("GET", "/api/leaderboard", undefined, agent)).data.leaderboard[0].agent, "New Muse");
+  assert.equal((await request("POST", "/api/tasks/1/result", { summary: "完成" }, agent)).status, 200);
+  assert.equal(DB.sqlite.prepare("SELECT claimed_by FROM tasks WHERE id=1").get().claimed_by, "Old Muse");
+  const after = await request("GET", "/api/tasks/1", undefined, agent);
+  assert.equal(after.data.verify_readiness.checks[0].detail.match(/已參與 1 位/) !== null, true);
+  const ranking = await request("GET", "/api/leaderboard", undefined, agent);
+  assert.equal(ranking.data.leaderboard.length, 1);
+  assert.equal(ranking.data.leaderboard[0].points, 15);
+  const ownerRename = await request("POST", "/api/admin/users/1/name", { name: "Whiteboard Owner" }, admin);
+  assert.equal(ownerRename.status, 200);
+  assert.equal((await request("GET", "/api/auth/me", undefined, admin)).data.user.name, "Whiteboard Owner");
+  const publisher = await request("POST", "/api/admin/users", { username: "publisher-one", name: "Old Publisher", role: "publisher" }, admin);
+  assert.equal((await request("POST", `/api/admin/users/${publisher.data.id}/name`, { name: "New Publisher" }, admin)).status, 200);
+  assert.equal((await request("GET", "/api/auth/me", undefined, { Authorization: `Bearer ${publisher.data.muse_token}` })).data.user.name, "New Publisher");
+  const humanTask = await request("POST", "/api/tasks", { title: "新人任务" }, { Authorization: `Bearer ${publisher.data.muse_token}` });
+  assert.equal(humanTask.data.status, "open");
+  assert.equal(DB.sqlite.prepare("SELECT created_by FROM tasks WHERE id=?").get(humanTask.data.id).created_by, "Old Publisher");
+  assert.equal((await request("GET", `/api/tasks/${humanTask.data.id}`, undefined, admin)).data.task.created_by, "New Publisher");
+});
+
+test("display-name edits require admin session, validate inputs and avoid ambiguous attribution", async () => {
+  const { request } = setup();
+  const { cookie } = await owner(request);
+  const admin = { Cookie: cookie, ...boardOrigin };
+  const first = await request("POST", "/api/admin/agents", { username: "first", name: "Shared" }, admin);
+  const second = await request("POST", "/api/admin/agents", { username: "second", name: "Shared" }, admin);
+  const endpoint = `/api/admin/agents/${first.data.id}/name`;
+  assert.equal((await request("POST", endpoint, { name: "Alias" })).status, 401);
+  assert.equal((await request("POST", endpoint, { name: "Alias" }, { Authorization: `Bearer ${first.data.token}` })).status, 403);
+  assert.equal((await request("POST", endpoint, { name: "Alias" }, { Cookie: cookie, Origin: "https://wrong.example" })).status, 403);
+  for (const name of ["   ", "x".repeat(81), 42]) assert.equal((await request("POST", endpoint, { name }, admin)).status, 400);
+  assert.equal((await request("POST", "/api/admin/agents/9999/name", { name: "Absent" }, admin)).status, 404);
+  assert.equal((await request("POST", `/api/admin/users/${first.data.id}/name`, { name: "Wrong kind" }, admin)).status, 404);
+  assert.equal((await request("POST", endpoint, { name: "Alias" }, admin)).status, 200);
+  assert.equal((await request("GET", "/api/admin/agents", undefined, admin)).data.accounts.find(x => x.id === first.data.id).name, "Alias");
+  const legacy = { Authorization: "Bearer old-shared-token" };
+  assert.equal((await request("POST", "/api/messages", { channelId: 1, author: "Shared", text: "同名测试" }, legacy)).status, 201);
+  assert.equal((await request("GET", "/api/messages?channelId=1", undefined, admin)).data.messages[0].author, "Shared");
+  assert.equal((await request("POST", `/api/admin/agents/${second.data.id}/revoke`, {}, admin)).status, 200);
+  assert.equal((await request("POST", `/api/admin/agents/${second.data.id}/name`, { name: "已停用的新标签" }, admin)).status, 200);
+  assert.equal((await request("GET", "/api/admin/agents", undefined, admin)).data.accounts.find(x => x.id === second.data.id).name, "已停用的新标签");
 });
 
 test("dashboard and Agent debate stances accept simplified Chinese and documented aliases", async () => {

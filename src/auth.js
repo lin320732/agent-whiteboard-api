@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   principal_id INTEGER NOT NULL,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS principal_labels (
+  principal_id INTEGER PRIMARY KEY,
+  display_name TEXT NOT NULL
 );`;
 
 export async function initAuthSchema(db) {
@@ -62,16 +66,18 @@ export async function principalFor(request, env) {
     const secret = header.slice(7);
     if (env.API_KEY && secret === env.API_KEY) return { id: null, name: "Legacy Agent", kind: "legacy", role: "agent", via: "legacy" };
     const tokenHash = await hashSecret(secret);
-    const row = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role, c.scope
+    const row = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role, c.scope, l.display_name
       FROM api_credentials c JOIN principals p ON p.id=c.principal_id
+      LEFT JOIN principal_labels l ON l.principal_id=p.id
       WHERE c.token_hash=? AND c.active=1 AND p.active=1`).bind(tokenHash).first();
     if (!row) return null;
     return { ...row, via: "bearer" };
   }
   const value = (request.headers.get("Cookie") || "").split(";").map(x => x.trim()).find(x => x.startsWith(`${SESSION_COOKIE}=`))?.slice(SESSION_COOKIE.length + 1);
   if (!value || !/^wbs_[a-f0-9]{64}$/.test(value)) return null;
-  const row = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role FROM sessions s
+  const row = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role, l.display_name FROM sessions s
     JOIN principals p ON p.id=s.principal_id
+    LEFT JOIN principal_labels l ON l.principal_id=p.id
     WHERE s.token_hash=? AND s.expires_at>? AND p.active=1 AND p.kind='human'`)
     .bind(await hashSecret(value), new Date().toISOString()).first();
   return row ? { ...row, via: "session" } : null;
@@ -133,16 +139,18 @@ export async function authRoute(request, env, principal, path) {
     if (request.headers.get("Origin") && !sessionOriginAllowed(request, env)) return fail("来源不符", 403);
     const body = await request.json().catch(() => ({}));
     if (!validUser(body.username) || typeof body.password !== "string" || body.password.length > 128) return fail("账号或密码错误", 401);
-    const user = await env.DB.prepare("SELECT id, username, name, kind, role, password_hash FROM principals WHERE username=? AND active=1 AND kind='human'").bind(body.username).first();
+    const user = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role, p.password_hash, l.display_name
+      FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id
+      WHERE p.username=? AND p.active=1 AND p.kind='human'`).bind(body.username).first();
     if (!user?.password_hash || user.password_hash !== await hashSecret(body.password)) return fail("账号或密码错误", 401);
     const secret = randomSecret("wbs_");
     const now = new Date();
     await env.DB.prepare("INSERT INTO sessions (token_hash, principal_id, expires_at, created_at) VALUES (?, ?, ?, ?)")
       .bind(await hashSecret(secret), user.id, new Date(now.getTime() + SESSION_AGE * 1000).toISOString(), now.toISOString()).run();
-    return reply({ ok: true, user: { id: user.id, username: user.username, name: user.name, kind: user.kind, role: user.role } }, 200, cookie(secret));
+    return reply({ ok: true, user: { id: user.id, username: user.username, name: user.display_name || user.name, kind: user.kind, role: user.role } }, 200, cookie(secret));
   }
   if (path === "/api/auth/me" && request.method === "GET") {
-    return principal ? reply({ ok: true, user: { id: principal.id, username: principal.username, name: principal.name, kind: principal.kind, role: principal.role, via: principal.via } }) : fail("未登录", 401);
+    return principal ? reply({ ok: true, user: { id: principal.id, username: principal.username, name: principal.display_name || principal.name, kind: principal.kind, role: principal.role, via: principal.via } }) : fail("未登录", 401);
   }
   if (path === "/api/auth/logout" && request.method === "POST") {
     if (!principal || principal.via !== "session" || !originAllowed(request, env, principal)) return fail("未授权", 403);
@@ -155,7 +163,9 @@ export async function authRoute(request, env, principal, path) {
   const listing = path.match(/^\/api\/admin\/(users|agents)$/);
   if (listing && request.method === "GET") {
     const kind = listing[1] === "users" ? "human" : "agent";
-    const data = await env.DB.prepare("SELECT id, username, name, kind, role, active, created_at FROM principals WHERE kind=? ORDER BY id").bind(kind).all();
+    const data = await env.DB.prepare(`SELECT p.id, p.username, COALESCE(l.display_name, p.name) AS name, p.kind, p.role, p.active, p.created_at
+      FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id
+      WHERE p.kind=? ORDER BY p.id`).bind(kind).all();
     return reply({ ok: true, accounts: data.results });
   }
   if (listing && request.method === "POST") {
@@ -165,6 +175,18 @@ export async function authRoute(request, env, principal, path) {
     if (!validUser(b.username) || !validName(b.name) || (kind === "human" && !["admin", "publisher", "viewer"].includes(role))) return fail("无效的账号、名称或角色");
     try { return reply({ ok: true, ...await createPrincipal(env.DB, { username: b.username, name: b.name.trim(), kind, role }) }, 201); }
     catch { return fail("账号名已存在", 409); }
+  }
+  const rename = path.match(/^\/api\/admin\/(users|agents)\/(\d+)\/name$/);
+  if (rename && request.method === "POST") {
+    const kind = rename[1] === "users" ? "human" : "agent", id = Number(rename[2]);
+    const body = await request.json().catch(() => ({}));
+    if (!validName(body.name)) return fail("显示名称需为 1–80 个字符");
+    const target = await env.DB.prepare("SELECT id FROM principals WHERE id=? AND kind=?").bind(id, kind).first();
+    if (!target) return fail("账号不存在", 404);
+    const name = body.name.trim();
+    await env.DB.prepare(`INSERT INTO principal_labels (principal_id, display_name) VALUES (?, ?)
+      ON CONFLICT(principal_id) DO UPDATE SET display_name=excluded.display_name`).bind(id, name).run();
+    return reply({ ok: true, id, name });
   }
   const change = path.match(/^\/api\/admin\/(users|agents)\/(\d+)\/(revoke|rotate)$/);
   if (change && request.method === "POST") {

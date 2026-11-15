@@ -442,6 +442,39 @@ function buildLeaderboard(eventRows) {
   return Object.values(byAgent).sort((a, b) => b.points - a.points || (a.agent < b.agent ? -1 : 1));
 }
 
+// Attribution stays under the original actor name in D1. Only response labels change.
+async function displayLabels(db) {
+  const rows = await db.prepare(`SELECT p.name AS actor, l.display_name
+    FROM principal_labels l JOIN principals p ON p.id=l.principal_id
+    WHERE (SELECT COUNT(*) FROM principals other WHERE other.name=p.name)=1`).all();
+  return new Map(rows.results.map(row => [row.actor, row.display_name]));
+}
+function projectDisplayNames(data, labels) {
+  const display = value => typeof value === "string" ? labels.get(value) || value : value;
+  const showActor = (item, field) => { if (item && field in item) item[field] = display(item[field]); };
+  const showTask = task => {
+    if (!task) return;
+    for (const field of ["created_by", "proposed_by", "claimed_by"]) showActor(task, field);
+    showReadiness(task.verify_readiness);
+  };
+  const namePattern = new RegExp(`([：、；])(${[...labels.keys()].sort((a, b) => b.length - a.length).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?=[、；（]|$)`, "g");
+  function showReadiness(readiness) {
+    for (const check of readiness?.checks || []) {
+      if (["agents", "challenge", "stances"].includes(check.key))
+        check.detail = check.detail.replace(namePattern, (_, separator, actor) => separator + display(actor));
+    }
+  }
+  showTask(data.task);
+  for (const task of data.tasks || []) showTask(task);
+  for (const list of ["challenges", "supplements", "debate", "force_approvals", "leaderboard"]) {
+    for (const row of data[list] || []) showActor(row, "agent");
+  }
+  for (const row of data.messages || []) showActor(row, "author");
+  for (const key of ["challenge", "supplement", "message"]) showActor(data[key], "agent");
+  showReadiness(data.verify_readiness);
+  return data;
+}
+
 // Access control is enforced once, before any business route. No route accepts a
 // request-body identity as proof of permission.
 function routeAction(method, path) {
@@ -469,7 +502,7 @@ const ENDPOINTS = [
   "GET /api/messages?channelId=1", "POST /api/messages",
 ];
 
-export default {
+const businessWorker = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/$/, "") || "/";
@@ -836,5 +869,17 @@ export default {
     }
 
     return err("找不到這個接口，見 GET / 看接口清單", 404);
+  },
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    const response = await businessWorker.fetch(request, env, ctx);
+    const path = new URL(request.url).pathname;
+    if (!env.DB || !response.ok || request.method === "OPTIONS" || !/^\/api\/(tasks|messages|leaderboard)(\/|$)/.test(path)) return response;
+    const labels = await displayLabels(env.DB);
+    if (!labels.size) return response;
+    const data = projectDisplayNames(await response.json(), labels);
+    return new Response(JSON.stringify(data, null, 2), { status: response.status, headers: response.headers });
   },
 };
