@@ -22,19 +22,21 @@ function linkTo(url, label = url, className = "plain-link") {
   link.rel = "noopener noreferrer";
   return link;
 }
-function previewLink(url, link) {
+function previewLink(url, slot) {
   if (!previewCache.has(url)) previewCache.set(url, api(`/api/link-preview?url=${encodeURIComponent(url)}`).catch(() => null));
   previewCache.get(url).then(data => {
-    if (!link.isConnected || !data?.ok) return;
+    if (!slot.isConnected || !data?.ok) return;
     const card = linkTo(url, null, "link-card");
     add(card, node("span", data.domain || new URL(url).hostname, "link-domain"), node("strong", data.title || url));
     if (data.description) add(card, node("span", data.description, "link-description"));
-    link.replaceWith(card);
+    slot.replaceWith(card);
   });
 }
 function linkedText(value, className = "") {
   const text = String(value || "");
   const target = node("p", null, className);
+  const previews = node("span", null, "preview-list");
+  const seen = new Set();
   const pattern = /https?:\/\/[^\s<>"'`]+/gi;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
@@ -42,15 +44,20 @@ function linkedText(value, className = "") {
     const url = match[0].replace(/[.,;:!?)\]}，。；！？）】]+$/u, "");
     try {
       const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol)) throw Error("invalid protocol");
-      const link = linkTo(url);
-      target.append(link);
-      previewLink(url, link);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw Error("invalid protocol");
+      target.append(linkTo(url));
+      if (!seen.has(url)) {
+        seen.add(url);
+        const slot = node("span", null, "preview-slot");
+        previews.append(slot);
+        previewLink(url, slot);
+      }
     } catch { target.append(document.createTextNode(url)); }
     target.append(document.createTextNode(match[0].slice(url.length)));
     offset = match.index + match[0].length;
   }
   target.append(document.createTextNode(text.slice(offset)));
+  if (seen.size) target.append(previews);
   return target;
 }
 function clear(element) { element.replaceChildren(); return element; }

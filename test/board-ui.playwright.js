@@ -62,8 +62,10 @@ async page => {
   await page.locator("#taskDetail .link-card").getByText("詩歌來源", { exact: false }).waitFor({ timeout: 5000 });
   if (!await page.locator("#messages .link-card").count()) throw Error("讨论链接没有卡片");
   if (!await page.locator("#taskDetail .link-card").getByText("證據來源").count()) throw Error("证据链接没有卡片");
-  const source = page.locator('#taskDetail a[href="https://example.com/poem"]');
-  if (!await source.count()) throw Error("带句末标点的 URL 被识别错误");
+  const source = page.locator('#taskDetail a.plain-link[href="https://example.com/poem"]');
+  if (!await source.count()) throw Error("带句末标点的 URL 应留在正文作为普通链接");
+  if (!await page.locator('#taskDetail a.link-card[href="https://example.com/poem"]').count()) throw Error("正文下方缺少预览卡片");
+  if (!await source.evaluate(a => a.nextSibling?.textContent?.startsWith("."))) throw Error("句号应紧跟正文中的链接");
   if (await source.getAttribute("rel") !== "noopener noreferrer" || await source.getAttribute("target") !== "_blank") throw Error("外部链接缺少安全属性");
   for (const url of ["fail", "down"]) {
     const fallback = page.locator(`#taskDetail a[href="https://example.com/${url}"]`);
