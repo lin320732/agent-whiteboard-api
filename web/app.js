@@ -13,6 +13,46 @@ function node(tag, value = "", className = "") {
   return element;
 }
 function add(parent, ...children) { parent.append(...children); return parent; }
+
+const previewCache = new Map();
+function linkTo(url, label = url, className = "plain-link") {
+  const link = node("a", label, className);
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+function previewLink(url, link) {
+  if (!previewCache.has(url)) previewCache.set(url, api(`/api/link-preview?url=${encodeURIComponent(url)}`).catch(() => null));
+  previewCache.get(url).then(data => {
+    if (!link.isConnected || !data?.ok) return;
+    const card = linkTo(url, null, "link-card");
+    add(card, node("span", data.domain || new URL(url).hostname, "link-domain"), node("strong", data.title || url));
+    if (data.description) add(card, node("span", data.description, "link-description"));
+    link.replaceWith(card);
+  });
+}
+function linkedText(value, className = "") {
+  const text = String(value || "");
+  const target = node("p", null, className);
+  const pattern = /https?:\/\/[^\s<>"'`]+/gi;
+  let offset = 0;
+  for (const match of text.matchAll(pattern)) {
+    target.append(document.createTextNode(text.slice(offset, match.index)));
+    const url = match[0].replace(/[.,;:!?)\]}，。；！？）】]+$/u, "");
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw Error("invalid protocol");
+      const link = linkTo(url);
+      target.append(link);
+      previewLink(url, link);
+    } catch { target.append(document.createTextNode(url)); }
+    target.append(document.createTextNode(match[0].slice(url.length)));
+    offset = match.index + match[0].length;
+  }
+  target.append(document.createTextNode(text.slice(offset)));
+  return target;
+}
 function clear(element) { element.replaceChildren(); return element; }
 function visible(id, yes) { $(id).hidden = !yes; }
 function notify(message, error = false) {
@@ -67,7 +107,7 @@ function entry(title, content, time) {
   const card = node("div", null, "entry");
   const header = node("header");
   add(header, node("strong", title), node("small", time || ""));
-  add(card, header, node("p", content));
+  add(card, header, linkedText(content));
   return card;
 }
 function section(title) {
@@ -202,14 +242,14 @@ async function selectTask(id) {
   const task = data.task;
   const target = clear($("taskDetail")); target.classList.remove("empty");
   add(target, node("span", statusText[task.status] || task.status, `badge ${task.status}`), typeBadge(task), node("h3", task.title));
-  if (task.detail) add(target, node("p", task.detail));
+  if (task.detail) add(target, linkedText(task.detail));
   const meta = node("div", null, "task-meta");
   add(meta, node("span", `发布：${task.created_by || "—"}`), node("span", `认领：${task.claimed_by || "—"}`), node("span", `截止：${task.deadline || "—"}`));
   add(target, meta);
   if (task.result_summary || task.result_links) {
     const result = section("结果与来源");
-    if (task.result_summary) add(result, node("p", task.result_summary));
-    if (task.result_links) add(result, node("p", task.result_links, "link-list"));
+    if (task.result_summary) add(result, linkedText(task.result_summary));
+    if (task.result_links) add(result, linkedText(task.result_links, "link-list"));
     add(target, result);
   }
   const readiness = section("核对条件");
