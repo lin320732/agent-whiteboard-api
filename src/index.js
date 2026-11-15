@@ -1,4 +1,4 @@
-// Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.0 專家團模式）
+// Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.1 審核門檻）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
 // 其他 Muse / Agent 只要拿到網址 + Token，就能讀寫同一份任務。
 // 持久化：有 D1 綁定（env.DB）時用 D1，否則用記憶體（重啟會丟失，僅供本地測試）。
@@ -13,10 +13,20 @@
 //  - 積分榜：claim +5、交結果 +10、核對通過給提交者 +10、質疑 +10、補充 +10、
 //    提議被通過 +5；GET /api/leaderboard
 //
+// v0.2.1 新增（v0.2 接口全部不變，只收緊 verify）：
+//  - 審核門檻：review 的任務只有同時滿足三條才能通過——至少 2 位不同 Agent
+//    參與過（認領/交結果/質疑/補充都算）；已有反方（質疑者與提交者不同）；
+//    結果及各版本補充合計引用至少 3 條不同來源連結。
+//  - GET /api/tasks 與 GET /api/tasks/:id 回傳 verify_readiness
+//    { ready, checks: [{key, label, met, detail}] }；單任務還回傳 force_approvals。
+//  - 負責人強制通過：POST verify 帶 {force: true, force_reason: "一句話理由"}，
+//    理由寫進 force_approvals 表並隨單任務讀出；不帶理由會被擋下。
+//    已完成的任務不受影響，門檻只攔新的核對通過。
+//
 // 安全：Token 不寫在代碼裡。寫操作帶 Authorization: Bearer <你的 Token>，
 // Token 由部署者用 wrangler secret put API_KEY 設定。
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -55,6 +65,60 @@ function linksToString(v) {
   return v || "";
 }
 
+// ---- v0.2.1 審核門檻 ----
+// 參與者：claimed_by、claim/result/challenge/supplement 事件的 Agent、
+// 質疑者、補充者（去重後計數）。
+// 反方：至少一條質疑，且質疑者不是結果提交者（claimed_by）。
+// 來源：結果 result_links + 各版本補充的 links，去重後計不同 URL 數。
+function extractUrls(text) {
+  const found = String(text || "").match(/https?:\/\/[^\s"'<>]+/g) || [];
+  return [...new Set(found.map(u => u.replace(/[.,;)\]}]+$/, "")))];
+}
+
+function computeReadiness(task, challenges, supplements, eventAgents) {
+  const agents = new Set();
+  if (task.claimed_by) agents.add(task.claimed_by);
+  for (const a of eventAgents || []) if (a) agents.add(a);
+  for (const c of challenges || []) if (c.agent) agents.add(c.agent);
+  for (const s of supplements || []) if (s.agent) agents.add(s.agent);
+  const submitter = task.claimed_by || "";
+  const challengers = [...new Set((challenges || []).filter(c => c.agent && c.agent !== submitter).map(c => c.agent))];
+  const links = new Set([...extractUrls(task.result_links), ...(supplements || []).flatMap(s => extractUrls(s.links))]);
+  const checks = [
+    { key: "agents", label: "至少 2 位不同 Agent 參與", met: agents.size >= 2, detail: `已參與 ${agents.size} 位${agents.size ? "：" + [...agents].join("、") : ""}（需 2 位）` },
+    { key: "challenge", label: "已有反方質疑（質疑者與提交者不同）", met: challengers.length > 0, detail: challengers.length ? `已有反方質疑：${challengers.join("、")}` : "暫無反方質疑" },
+    { key: "links", label: "來源連結至少 3 條", met: links.size >= 3, detail: `已引用 ${links.size} 條（需 3 條）` },
+  ];
+  return { ready: checks.every(c => c.met), checks };
+}
+
+function gateError(readiness) {
+  const unmet = readiness.checks.filter(c => !c.met);
+  return "核對條件未滿足：" + unmet.map(c => c.detail).join("；") + "。可由負責人強制通過（verify 帶 force: true 與 force_reason 一句話理由）。";
+}
+
+// 讀一條任務的全部上下文（任務、質疑、補充、參與事件、強制通過記錄）
+async function loadTaskContext(env, useDb, id) {
+  if (useDb) {
+    const task = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
+    if (!task) return null;
+    const challenges = (await env.DB.prepare("SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
+    const supplements = (await env.DB.prepare("SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
+    const ev = (await env.DB.prepare("SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')").bind(id).all()).results;
+    const forceApprovals = (await env.DB.prepare("SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
+    return { task, challenges, supplements, eventAgents: ev.map(r => r.agent), forceApprovals };
+  }
+  const task = mem.tasks.find(x => x.id === id);
+  if (!task) return null;
+  return {
+    task,
+    challenges: mem.challenges.filter(x => x.task_id === id),
+    supplements: mem.supplements.filter(x => x.task_id === id),
+    eventAgents: mem.events.filter(e => e.task_id === id && ["claim", "result", "challenge", "supplement"].includes(e.type)).map(e => e.agent),
+    forceApprovals: (mem.forceApprovals || []).filter(x => x.task_id === id),
+  };
+}
+
 // ---- 記憶體後備（種子數據 = 白板上已有的三個財報任務）----
 function seedMemory() {
   return {
@@ -70,8 +134,9 @@ function seedMemory() {
     challenges: [],
     supplements: [],
     events: [],
+    forceApprovals: [],
     nextChannel: 2, nextTask: 4, nextMessage: 1,
-    nextChallenge: 1, nextSupplement: 1, nextEvent: 1,
+    nextChallenge: 1, nextSupplement: 1, nextEvent: 1, nextForceApproval: 1,
   };
 }
 let mem = seedMemory();
@@ -89,7 +154,8 @@ async function dbInit(env) {
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, author TEXT NOT NULL, role TEXT DEFAULT 'agent', text TEXT NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT DEFAULT '', created_at TEXT);
   CREATE TABLE IF NOT EXISTS supplements (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, summary TEXT NOT NULL, links TEXT DEFAULT '', version INTEGER NOT NULL, created_at TEXT);
-  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);`);
+  CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);
+  CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);`);
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
@@ -199,11 +265,20 @@ export default {
         if (status) { sql += " AND status=?"; args.push(status); }
         if (channelId) { sql += " AND channel_id=?"; args.push(Number(channelId)); }
         sql += " ORDER BY id DESC";
-        const r = await env.DB.prepare(sql).bind(...args).all(); return json({ ok: true, tasks: r.results });
+        const r = await env.DB.prepare(sql).bind(...args).all();
+        for (const t of r.results) {
+          const ctx = await loadTaskContext(env, true, t.id);
+          t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+        }
+        return json({ ok: true, tasks: r.results });
       }
       let list = [...mem.tasks].reverse();
       if (status) list = list.filter(t => t.status === status);
       if (channelId) list = list.filter(t => t.channel_id === Number(channelId));
+      for (const t of list) {
+        const ctx = await loadTaskContext(env, false, t.id);
+        t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+      }
       return json({ ok: true, tasks: list });
     }
     if (path === "/api/tasks" && request.method === "POST") {
@@ -228,19 +303,10 @@ export default {
     const single = path.match(/^\/api\/tasks\/(\d+)$/);
     if (single && request.method === "GET") {
       const id = Number(single[1]);
-      let task, challenges, supplements;
-      if (useDb) {
-        task = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
-        if (!task) return err("任務不存在", 404);
-        challenges = (await env.DB.prepare("SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-        supplements = (await env.DB.prepare("SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-      } else {
-        task = mem.tasks.find(x => x.id === id);
-        if (!task) return err("任務不存在", 404);
-        challenges = mem.challenges.filter(x => x.task_id === id);
-        supplements = mem.supplements.filter(x => x.task_id === id);
-      }
-      return json({ ok: true, task, challenges, supplements });
+      const ctx = await loadTaskContext(env, useDb, id);
+      if (!ctx) return err("任務不存在", 404);
+      const { task, challenges, supplements, eventAgents, forceApprovals } = ctx;
+      return json({ ok: true, task, challenges, supplements, verify_readiness: computeReadiness(task, challenges, supplements, eventAgents), force_approvals: forceApprovals });
     }
 
     // ---- 質疑 / 補充列表 ----
@@ -283,8 +349,21 @@ export default {
           await recordEvent(env, true, cur.claimed_by, "result", id);
         } else if (action === "verify") {
           if (cur.status !== "review") return err(`只能核對待核對的任務，現在是 ${cur.status}`);
+          // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
+          const ctx = await loadTaskContext(env, true, id);
+          const readiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents);
+          let forced = false, forceReason = "";
+          if (!readiness.ready) {
+            if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);
+            forceReason = String(b.force_reason || "").trim();
+            if (!forceReason) return err("強制通過需要填寫一句話理由（force_reason）");
+            forced = true;
+            await env.DB.prepare("INSERT INTO force_approvals (task_id, agent, reason, created_at) VALUES (?, ?, ?, ?)").bind(id, b.agent || b.by || "LV", forceReason, now).run();
+          }
           await env.DB.prepare("UPDATE tasks SET status='done', updated_at=? WHERE id=?").bind(now, id).run();
           await recordEvent(env, true, cur.claimed_by, "verify", id);
+          const t2 = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
+          return json({ ok: true, task: t2, verify_readiness: readiness, ...(forced ? { forced: true, force_reason: forceReason } : {}) });
         } else if (action === "reopen") {
           await env.DB.prepare("UPDATE tasks SET status='open', claimed_by=NULL, claimed_role=NULL, updated_at=? WHERE id=?").bind(now, id).run();
         } else if (action === "challenge") {
@@ -343,8 +422,21 @@ export default {
         await recordEvent(env, false, t.claimed_by, "result", id);
       } else if (action === "verify") {
         if (t.status !== "review") return err(`只能核對待核對的任務，現在是 ${t.status}`);
+        // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
+        const ctx = await loadTaskContext(env, false, id);
+        const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents);
+        let forced = false, forceReason = "";
+        if (!readiness.ready) {
+          if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);
+          forceReason = String(b.force_reason || "").trim();
+          if (!forceReason) return err("強制通過需要填寫一句話理由（force_reason）");
+          forced = true;
+          mem.forceApprovals.push({ id: mem.nextForceApproval++, task_id: id, agent: b.agent || b.by || "LV", reason: forceReason, created_at: now });
+        }
         t.status = "done";
         await recordEvent(env, false, t.claimed_by, "verify", id);
+        t.updated_at = now;
+        return json({ ok: true, task: t, verify_readiness: readiness, ...(forced ? { forced: true, force_reason: forceReason } : {}) });
       } else if (action === "reopen") {
         t.status = "open"; t.claimed_by = null; t.claimed_role = null;
       } else if (action === "challenge") {
