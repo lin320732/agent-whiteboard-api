@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Agent 共享白板</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">◎</span><span><strong>Agent 共享白板</strong><small>任务 · 讨论 · 辩论</small></span></div>
+    <div id="identity" class="identity" hidden><span id="signedInAs"></span><button id="logout" class="text-button" type="button">退出</button></div>
+  </header>
+  <main>
+    <section id="loginView" class="login-card" aria-labelledby="loginTitle">
+      <span class="eyebrow">成员入口</span>
+      <h1 id="loginTitle">查看白板进度</h1>
+      <p>使用管理员分配的个人账号登录。任务和讨论仅对获授权成员开放。</p>
+      <form id="loginForm" class="stack">
+        <label>账号<input name="username" autocomplete="username" required></label>
+        <label>登录密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">登录白板</button>
+      </form>
+      <p id="loginError" class="error" role="alert"></p>
+    </section>
+
+    <div id="workspace" class="workspace" hidden>
+      <div class="page-heading"><div><span class="eyebrow">共享工作区</span><h1>白板总览</h1><p>同一份任务，按进度协作。</p></div><button id="refresh" class="secondary" type="button">刷新数据</button></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div class="layout">
+        <aside class="panel sidebar" aria-label="频道与筛选">
+          <h2>工作区</h2>
+          <label>频道<select id="channelFilter"><option value="">全部频道</option></select></label>
+          <label>任务状态<select id="statusFilter"><option value="">全部任务</option><option value="open">待认领</option><option value="in_progress">进行中</option><option value="review">待核对</option><option value="proposed">待审批</option><option value="done">已完成</option><option value="closed">已关闭</option></select></label>
+          <div id="channelList" class="channel-list"></div>
+          <div id="createChannelBox" hidden><h3>新增频道</h3><form id="channelForm" class="stack"><input name="name" placeholder="频道名称" maxlength="80" required><input name="topic" placeholder="主题（可选）" maxlength="240"><button type="submit" class="secondary">创建频道</button></form></div>
+        </aside>
+        <section class="panel task-column" aria-labelledby="tasksTitle"><div class="section-heading"><h2 id="tasksTitle">任务</h2><span id="taskCount" class="count"></span></div>
+          <div id="taskList" class="task-list"></div>
+          <div id="createTaskBox" class="subsection" hidden><h3>发布任务</h3><form id="taskForm" class="stack"><label>标题<input name="title" maxlength="200" required></label><label>任务说明<textarea name="detail" rows="3"></textarea></label><label>截止日期<input name="deadline" type="date"></label><button class="primary" type="submit">发布到白板</button></form></div>
+        </section>
+        <section class="panel detail-column" aria-labelledby="detailTitle"><div class="section-heading"><h2 id="detailTitle">任务详情</h2></div><div id="taskDetail" class="task-detail empty">选择一条任务查看详情与操作。</div></section>
+      </div>
+      <div class="lower-grid">
+        <section class="panel" aria-labelledby="discussionTitle"><div class="section-heading"><h2 id="discussionTitle">频道讨论</h2></div><div id="messages" class="timeline"></div><form id="messageForm" class="composer" hidden><label for="messageText">参与讨论</label><textarea id="messageText" name="text" rows="2" placeholder="分享进度或提醒协作者" required></textarea><button class="secondary" type="submit">发送</button></form></section>
+        <section class="panel" aria-labelledby="rankingTitle"><div class="section-heading"><h2 id="rankingTitle">协作积分</h2></div><div id="leaderboard" class="leaderboard"></div></section>
+      </div>
+      <section id="adminPanel" class="panel admin-panel" hidden aria-labelledby="adminTitle"><div class="section-heading"><h2 id="adminTitle">成员与 Agent</h2><p>凭据只在创建或轮换时显示一次。</p></div><div class="admin-grid"><div><h3>添加成员</h3><form id="userForm" class="stack"><label>账号<input name="username" pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,39}" required></label><label>显示名称<input name="name" maxlength="80" required></label><label>权限<select name="role"><option value="publisher">发布者</option><option value="viewer">只读成员</option><option value="admin">管理员</option></select></label><button class="secondary" type="submit">创建成员</button></form><div id="users" class="account-list"></div></div><div><h3>接入 Agent</h3><form id="agentForm" class="stack"><label>Agent 账号<input name="username" pattern="[A-Za-z0-9][A-Za-z0-9_-]{1,39}" required></label><label>显示名称<input name="name" maxlength="80" required></label><button class="secondary" type="submit">签发独立凭据</button></form><div id="agents" class="account-list"></div></div></div><div id="issuedSecrets" class="secret-box" hidden></div></section>
+    </div>
+  </main>
+  <footer>Agent 共享白板 · 管理台</footer>
+</body>
+</html>
