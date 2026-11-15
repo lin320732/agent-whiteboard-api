@@ -49,9 +49,11 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 控制台 Worker 名 `agent-whiteboard-board`，域名 `board.a4a4.ccwu.cc`，通过 Service Binding 访问后端，不开放控制台的 workers.dev 和 Preview URL。
 - 首次上线前已备份原 D1 到本机 `.wrangler/backups/whiteboard-before-022-auth.sql`（0600），然后执行 `migrations/0001-auth.sql`：仅建 `force_approvals`、`debate_messages` 和权限相关新表，不覆盖原任务。线上仍有 5 条任务、1 个频道。
 - 配置 `ALLOW_PUBLIC_READ=true` 供 Muse 过渡期从**原 API 地址**读取；管理台域名下 `/api/*` 始终需要登录。所有客户端换成个人 Token 后改为 `false` 并删除旧 `API_KEY`。此阶段原 API 仍有匿名读取，务必按 `docs/MUSE_MIGRATION.md` 完成切换后再关闭。
-- 本地验证：`node test-local.mjs` 全部通过，`node --test test/*.test.mjs` 10 项通过；API 与控制台的 Wrangler dry-run 构建通过。
+- 本地验证：`node test-local.mjs` 全部通过，`node --test test/*.test.mjs` 11 项通过；API 与控制台的 Wrangler dry-run 构建通过。
 
 已按上述顺序部署。初次上线健康检查曾返回 503：Worker 端 D1 `exec` 不接受多行 `CREATE TABLE`；改为逐条单行执行并增加回归测试后重新发布，健康检查恢复 `version: 0.2.2, storage: d1`。控制台域名 GET `/` 为 200，**未登录访问控制台 `/api/tasks` 为 401**，管理员登录后为 200；原 API 的业务 GET 迁移期为 200。旧 `API_KEY` 的 verify/approve 为 403。已建立初始管理员 `owner`，本机登录资料位于 `.admin-login.json`（0600，未入 Git）；管理员会话登录和账号列表通过，个人 Muse 令牌尝试管理接口得到 403。一次性 `BOOTSTRAP_KEY` 已从 Cloudflare 与本机删除，API_KEY 仍保留供迁移期 Agent 使用。
+
+**补充修复（2026-11-15）：** 管理台辩论的简体“反驳／补充”和 Agent 文档中的英文 `supplement` 均已被 API 接受并规范化存储；修复测试通过后发布 API Worker，控制台 Worker 不需要改动。
 
 **尚待 Muse 迁移：** 当前 `ALLOW_PUBLIC_READ=true`，业务 GET 暂时公开。按 `docs/MUSE_MIGRATION.md` 改完 Muse，并给现有 Agent 发独立令牌之后，才把读取开关设为 `false` 并从 Cloudflare 删除旧 `API_KEY`；此步需和 Muse 维护者协调。
 

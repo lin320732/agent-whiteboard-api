@@ -87,7 +87,7 @@ function extractUrls(text) {
 }
 
 // 辯論立場：接受中文或英文別名，統一存中文
-const STANCES = { "支持": "支持", "support": "支持", "反駁": "反駁", "rebut": "反駁", "補充": "補充", "add": "補充" };
+const STANCES = { "支持": "支持", "support": "支持", "反駁": "反駁", "反驳": "反駁", "rebut": "反駁", "補充": "補充", "补充": "補充", "add": "補充", "supplement": "補充" };
 function normalizeStance(v) {
   const key = String(v || "").trim();
   return Object.hasOwn(STANCES, key) ? STANCES[key] : "";

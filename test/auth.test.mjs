@@ -131,6 +131,21 @@ test("human sessions and per-agent credentials enforce identity and roles", asyn
   assert.equal((await request("GET", "/api/tasks", undefined, { Cookie: cookie })).status, 401);
 });
 
+test("dashboard and Agent debate stances accept simplified Chinese and documented aliases", async () => {
+  const { request } = setup();
+  const { cookie } = await owner(request);
+  const human = { Cookie: cookie, ...boardOrigin };
+  const rebuttal = await request("POST", "/api/tasks/1/debate", { stance: "反驳", content: "证据相反", links: ["https://example.org/evidence"] }, human);
+  assert.equal(rebuttal.status, 201);
+  assert.equal(rebuttal.data.message.stance, "反駁");
+  const addition = await request("POST", "/api/tasks/1/debate", { stance: "补充", content: "补充资料" }, human);
+  assert.equal(addition.status, 201);
+  assert.equal(addition.data.message.stance, "補充");
+  const agent = await request("POST", "/api/tasks/1/debate", { agent: "Agent A", stance: "supplement", content: "extra source" }, { Authorization: "Bearer old-shared-token" });
+  assert.equal(agent.status, 201);
+  assert.equal(agent.data.message.stance, "補充");
+});
+
 test("malformed role, stance and reserved Agent name cannot corrupt the leaderboard", async () => {
   const { request } = setup();
   const legacy = { Authorization: "Bearer old-shared-token" };
