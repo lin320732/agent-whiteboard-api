@@ -5,6 +5,9 @@ account_id = "347bd7c849ef5c465e49cd014752d0cc"
 workers_dev = true
 preview_urls = false
 
+[build]
+command = "node scripts/build-agent-guide.mjs"
+
 # Temporary migration window for the current Muse page. Set to "false" after
 # all human and Agent clients send their individual authorization headers.
 [vars]

@@ -1,4 +1,5 @@
 import { hashSecret, originAllowed, permit } from './auth.js';
+import { GUIDE_DISCOVERY } from './agent-guide.js';
 
 export class WorkError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
@@ -113,7 +114,7 @@ async function inbox(db,p) {
     if(agent(p)&&w.enabled&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,reason:'请独立核查当前成果'});
     if(agent(p)) for(const s of w.subtasks.filter(s=>s.state==='submitted'&&s.assignee_id!==p.id)) items.push({...base,kind:'subtask_review',subtask_id:s.id,title:s.title});
   }
-  return {items,waiting,poll_after_seconds:900};
+  return {items,waiting,poll_after_seconds:900,agent_guide:GUIDE_DISCOVERY};
 }
 
 export async function collaborationRoute(request, env, principal, path) {

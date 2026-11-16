@@ -2,6 +2,7 @@ import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRou
 import { initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
+import { initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -66,7 +67,7 @@ const VERSION = "0.2.4";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match",
 };
 
 // 角色：API 用英文 key，中文名只出現在文檔與白板顯示
@@ -446,6 +447,7 @@ async function initializeDatabase(env) {
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
   await initCollaboration(env.DB);
+  await initAgentGuide(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
@@ -557,6 +559,7 @@ function routeAction(method, path) {
 }
 
 const ENDPOINTS = [
+  "GET /api/agent-guide", "POST /api/admin/agent-guide",
   "GET /api/channels", "POST /api/channels",
   "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "POST /api/tasks",
   "GET /api/tasks/:id", "POST /api/tasks/:id/claim", "POST /api/tasks/:id/result",
@@ -583,11 +586,13 @@ const businessWorker = {
 
     // 健康檢查公開；業務資料和寫入均由 API Worker 逐請求校驗。
     if (path === "/" || path === "/api/health") {
-      return json({ ok: true, service: "agent-whiteboard-api", version: VERSION, storage: useDb ? "d1" : "memory (prototype only)", endpoints: ENDPOINTS });
+      return json({ ok: true, service: "agent-whiteboard-api", version: VERSION, storage: useDb ? "d1" : "memory (prototype only)", endpoints: ENDPOINTS, agent_guide: GUIDE_DISCOVERY });
     }
 
     const principal = useDb ? await principalFor(request, env) : { kind: "test", role: "admin", name: "Local Test" };
     if (useDb) {
+      const guideResponse = await agentGuideRoute(request, env, principal, path);
+      if (guideResponse) return guideResponse;
       const handled = await authRoute(request, env, principal, path);
       if (handled) return handled;
       const workResponse = await collaborationRoute(request, env, principal, path);
@@ -659,7 +664,7 @@ const businessWorker = {
           }));
         }
         const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
-        return json({ ok: true, tasks });
+        return json({ ok: true, tasks, agent_guide: GUIDE_DISCOVERY });
       }
       let list = [...mem.tasks].reverse();
       if (status) list = list.filter(t => t.status === status);
@@ -671,7 +676,7 @@ const businessWorker = {
         t.collaboration = computeCollaboration(t, readiness, ctx);
       }
       if (needs === "agent") list = list.filter(t => t.collaboration.help_wanted);
-      return json({ ok: true, tasks: list });
+      return json({ ok: true, tasks: list, agent_guide: GUIDE_DISCOVERY });
     }
     if (path === "/api/tasks" && request.method === "POST") {
       const b = await request.json().catch(() => ({}));
