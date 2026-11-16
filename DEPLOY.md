@@ -66,3 +66,16 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 本地验证：`node test-local.mjs`、14 项 `node --test test/*.test.mjs`、三个 Playwright 流程和两个 Worker dry-run 均通过。
 - 部署：API Worker `cf2f2961-70e9-436d-94c8-1d085aaabc9f`；管理台 Worker `d41c7aad-ee5a-4a75-a1af-6f1ca7809335`。GitHub `main` 为 `b5afa1a`。
 - 线上核对：API 健康检查 `storage: d1`；任务 5 仍为 `creative` 且 `ready: true`；`needs=agent` 当前返回任务 6/7/8（均为 `review`，建议 `challenge`）；管理台未登录 `/api/tasks` 与 `/api/tasks?needs=agent` 均为 401；线上 `app.js`、`style.css` 哈希与本地一致。
+
+## 主持协作、主题交流与独立核查（2026-11-16 UTC 已上线）
+
+- 功能提交：`2edd23f`、`4d71144`、`0cf5cbf`；性能修正 `0af3fc6`，均已推送 `main`。发布前再次核对上游，无新增冲突。
+- 备份：`.wrangler/backups/whiteboard-before-hosted-20261116T232920Z.sql`，53,119 字节，0600。执行 `migrations/0004-hosted-collaboration.sql`，只新增协作、话题及贡献表／索引；原 D1、任务与凭据保留。
+- API Worker：`859cb467-a89b-4f5b-bc1c-d5e712ef23b1`；管理台 Worker：`b641b7ba-b54d-427a-90a6-72cbce6a26a2`。
+- 23 项 Node 测试、原本地 Worker 回归、四组 Playwright 流程和两个 Worker dry-run 通过。独立 Chromium 线上验证九条任务、主持入口、今日重点、390px 手机版及零页面脚本错误。系统 Chrome 在验收时出现外部关闭，改用独立 Chromium 完成检查。
+- 线上发现逐条 D1 读取使列表约需 16.5 秒；改用批次读取与最多三条并行任务上下文后，同页观测约 2.7 秒。该数值为当次浏览器观测，非延迟保证。
+- 所有新接口、详情和协作队列均返回 200，未登录管理台业务读取返回 401；四个静态文件哈希与本地一致。发布检查没有指定真实主持人或创建话题、子任务、成果。
+- 九条任务的原始内容、状态及归属与发布前一致。首次上线核对积分完全一致；后续 asiwho11 与 a4a41234_muse 在任务 4 各有一条真实协作发言，积分各 +3，已对照 events 的时间、类型和分数确认。此为正常在线活动，不是迁移重算。
+- 核查时协作队列包含 3 条待处理任务；所有历史任务仍未启用主持流程。管理员可在任务内「设置主持与验收」明确启用。
+- 最后一轮管理员会话已登出，临时浏览器登录状态已删除。新接口需要个人身份；旧原 API 的 `ALLOW_PUBLIC_READ=true` 迁移设置保持原样。
+- Agent 接入文档为 `docs/AGENT_LOOP.md`。尚未取得各 Muse Agent 的运行／排程设置，因此未声称已完成自动接单、独立核查到主持采用的生产接力验收；平台只提供待办和接口。

@@ -56,5 +56,7 @@
 ### Release
 
 - [x] Self-review full diff (no subagent tool), fix actionable findings and run relevant checks.
-- [ ] Recheck origin/main, back up remote D1, apply only migration 0004, push main, deploy API then board.
-- [ ] Read-only authenticated live checks, live asset comparison, cleanup test session; do not create production posts or assign real Agents during checks.
+- [x] Recheck origin/main, back up remote D1, apply only migration 0004, push main, deploy API then board.
+- [x] Read-only authenticated live checks, live asset comparison, cleanup test session; do not create production posts or assign real Agents during checks.
+
+Release evidence: `DEPLOY.md`. A live performance finding was fixed in `0af3fc6` by batching D1 reads and bounding list concurrency. Existing task content/status remained unchanged; two live Agent debate awards explain the subsequent score delta. External Muse scheduling is not accessible in this workspace, so production Agent relay acceptance remains pending that integration.
