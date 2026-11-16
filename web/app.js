@@ -1,3 +1,4 @@
+import { createCollaborationUI } from './collaboration.js';
 const $ = id => document.getElementById(id);
 const state = { user: null, channels: [], tasks: [], selected: null, detail: null };
 const statusText = { open: "待认领", in_progress: "进行中", review: "待核对", proposed: "待审批", done: "已完成", closed: "已关闭" };
@@ -5,6 +6,7 @@ const typeText = { research: "调研", creative: "创意", debate: "辩论", dat
 const taskType = task => Object.hasOwn(typeText, task.type) ? task.type : "research";
 const typeBadge = task => node("span", typeText[taskType(task)], `badge task-type ${taskType(task)}`);
 const roleText = { admin: "管理员", publisher: "发布者", viewer: "只读成员", agent: "Agent" };
+const workUI = createCollaborationUI({api,node,linkedText,button,user:()=>state.user,selectTask,notify});
 
 function node(tag, value = "", className = "") {
   const element = document.createElement(tag);
@@ -84,6 +86,7 @@ async function api(path, method = "GET", body) {
 }
 function showLogin() {
   state.user = null;
+  workUI.reset();
   visible("workspace", false);
   visible("identity", false);
   visible("loginView", true);
@@ -235,6 +238,7 @@ async function refresh() {
   state.channels = channels.channels;
   state.tasks = tasks.tasks;
   renderChannels(); renderTasks(); renderMessages(messages.messages); renderLeaderboard(ranking.leaderboard);
+  await workUI.refreshHome();
   if (state.selected) {
     if (state.tasks.some(t => t.id === state.selected)) await selectTask(state.selected);
     else { state.selected = null; clear($("taskDetail")).textContent = "选择一条任务查看详情与操作。"; }
@@ -246,17 +250,18 @@ async function act(id, action, body = {}) {
   notify("操作已保存");
   await refresh();
 }
-function detailActions(task, readiness) {
+function detailActions(task, readiness, workflow) {
   const isAdmin = state.user?.role === "admin";
   if (!isAdmin) return null;
   const actions = node("div", null, "action-row");
   if (task.status === "proposed") {
-    add(actions, button("批准提议", () => act(task.id, "approve"), "primary"), button("驳回提议", async () => {
+    add(actions, node("p", "请在上方指定主持人及验收要求，再批准提案。", "muted"), button("驳回提议", async () => {
       if (confirm("确定驳回这条提议？")) await act(task.id, "reject");
     }, "danger"));
   }
   if (task.status === "review") {
     if (readiness?.ready) add(actions, button("核对通过", () => act(task.id, "verify"), "primary"));
+    else if (workflow?.enabled) add(actions, node('p','完成上方核查条件后即可确认交付。','muted'));
     else add(actions, button("填写理由并强制通过", async () => {
       const reason = prompt("请输入强制通过的理由（会记录在任务中）");
       if (reason?.trim()) await act(task.id, "verify", { force: true, force_reason: reason.trim() });
@@ -325,8 +330,12 @@ async function selectTask(id) {
   const meta = node("div", null, "task-meta");
   add(meta, node("span", `发布：${task.created_by || "—"}`), node("span", `认领：${task.claimed_by || "—"}`), node("span", `截止：${task.deadline || "—"}`));
   add(target, meta);
+  target.classList.toggle('has-workflow', !!data.workflow?.enabled);
+  const hosted = workUI.renderTask(data);
+  if (hosted) add(target, hosted);
   if (task.result_summary || task.result_links) {
-    const result = section("结果与来源");
+    const result = data.workflow?.enabled ? node('details',null,'detail-section') : section("结果与来源");
+    if(data.workflow?.enabled) add(result,node('summary','原始提交与来源'));
     if (task.result_summary) add(result, linkedText(task.result_summary));
     if (task.result_links) add(result, linkedText(task.result_links, "link-list"));
     add(target, result);
@@ -341,13 +350,13 @@ async function selectTask(id) {
   const collaboration = data.collaboration;
   if (collaboration?.help_wanted) {
     const hint = section("协作提示");
-    const labels = { claim: "认领", debate: "参与讨论", challenge: "提出质疑", supplement: "补充来源" };
+    const labels = { claim: "认领", debate: "参与讨论", challenge: "提出质疑", supplement: "补充来源", respond: "回应问题", outcome: "整理成果", review: "独立核查", coordinate: "协调分工", wait: "等待恢复" };
     add(hint, node("p", collaboration.reason || "还需要其他 Agent 参与。", "muted"));
     if (collaboration.suggested_action) add(hint, node("span", `建议 Agent：${labels[collaboration.suggested_action] || collaboration.suggested_action}`, "badge help-wanted"));
     hint.className += " collaboration-hint";
     add(target, hint);
   }
-  const controls = detailActions(task, data.verify_readiness);
+  const controls = detailActions(task, data.verify_readiness, data.workflow);
   if (controls) add(target, controls);
   const form = debateForm(task, data.debate || []);
   const conversation = renderTaskConversation(data, form ? item => {

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './helpers.mjs';
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 test('topics enforce a Macau-day cap, keep replies in their thread and turn discussion into an unapproved proposal',async()=>{
   const {request,DB,admin,host,worker}=await fixture();
@@ -49,6 +50,43 @@ test('hosted migration applies twice without touching historical task and event 
   const sql=readFileSync(new URL('../migrations/0004-hosted-collaboration.sql',import.meta.url),'utf8');
   DB.sqlite.exec(sql);DB.sqlite.exec(sql);
   assert.deepEqual(DB.sqlite.prepare('SELECT * FROM tasks ORDER BY id').all(),before);
+  const fresh=new DatabaseSync(':memory:');fresh.exec(sql);
+  for(const {name} of fresh.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name!='sqlite_sequence'").all()) {
+    assert.deepEqual(fresh.prepare(`PRAGMA table_info(${name})`).all(),DB.sqlite.prepare(`PRAGMA table_info(${name})`).all(),`${name}: migration must match runtime schema`);
+  }
+  fresh.close();
+});
+
+test('concurrent proposals create one task; stale issue confirmation fails and disputes reach admin inbox',async()=>{
+  const f=await fixture(),{request,DB,admin,host,worker,checker}=f;
+  const topic=await request('POST','/api/topics',{theme:'tools',title:'接力测试',content:'提出任务'},host.auth);
+  const before=DB.sqlite.prepare('SELECT COUNT(*) AS n FROM tasks').get().n;
+  const b={title:'试做',detail:'小样',expected:'演示',value:'核实价值'};
+  const proposals=await Promise.all([request('POST',`/api/topics/${topic.data.id}/propose`,b,host.auth),request('POST',`/api/topics/${topic.data.id}/propose`,b,host.auth)]);
+  assert.deepEqual(proposals.map(x=>x.status).sort(),[201,409]);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM tasks').get().n,before+1);
+  await hosted(f);
+  const issue=(await request('POST','/api/tasks/1/issues',{text:'数据有争议'},checker.auth)).data.id;
+  await request('POST',`/api/tasks/1/issues/${issue}/respond`,{text:'修订第一版'},host.auth);
+  const old=(await request('GET','/api/tasks/1',undefined,checker.auth)).data.workflow.issues[0].revision;
+  await request('POST',`/api/tasks/1/issues/${issue}/respond`,{text:'修订第二版'},host.auth);
+  assert.equal((await request('POST',`/api/tasks/1/issues/${issue}/resolve`,{note:'误批旧版',revision:old},checker.auth)).status,409);
+  assert.equal((await request('POST',`/api/tasks/1/issues/${issue}/dispute`,{note:'仍未解决：缺少独立来源'},checker.auth)).status,200);
+  assert.ok((await request('GET','/api/inbox',undefined,admin)).data.items.some(i=>i.issue_id===issue&&i.state==='disputed'));
+});
+
+test('waiting workflows suppress premature host work; revoked or contributing reviewers cannot self-certify',async()=>{
+  const f=await fixture(),{request,DB,admin,host,worker,checker}=f;
+  await hosted(f);
+  assert.equal((await request('POST','/api/tasks/1/wait',{reason:'等财报',resume_at:'2030-01-01T00:00:00Z'},host.auth)).status,200);
+  const inbox=(await request('GET','/api/inbox',undefined,host.auth)).data;
+  assert.ok(inbox.waiting.some(i=>i.task_id===1));
+  assert.equal(inbox.items.some(i=>i.task_id===1&&i.kind==='host'),false);
+  await request('POST','/api/tasks/1/supplement',{summary:'我也写了关键结果',links:['https://example.com/checker']},checker.auth);
+  const w=(await request('GET','/api/tasks/1',undefined,checker.auth)).data.workflow;
+  assert.equal((await request('POST','/api/tasks/1/reviews',{fingerprint:w.fingerprint,note:'自批补充',evidence:['https://example.com/checker']},checker.auth)).status,403);
+  await request('POST',`/api/admin/agents/${checker.id}/revoke`,{},admin);
+  assert.equal((await request('GET','/api/inbox',undefined,checker.auth)).status,401);
 });
 
 async function hosted(f) {
@@ -79,8 +117,27 @@ test('hosted policy accepts independent verification, rejects self review and in
   assert.equal(d.verify_readiness.ready,false);
   assert.equal((await request('POST','/api/tasks/1/reviews',check,checker.auth)).status,409);
   assert.equal((await request('POST','/api/tasks/1/verify',{},admin)).status,400);
+  assert.equal((await request('POST','/api/tasks/1/verify',{force:true,force_reason:'试图跳过独立核查'},admin)).status,400);
   assert.equal((await request('GET','/api/inbox')).status,401);
   assert.equal((await request('GET','/api/inbox',undefined,checker.auth)).data.items.some(i=>i.task_id===1),true);
+  assert.equal((await request('POST','/api/tasks/1/reviews',{...check,fingerprint:d.workflow.fingerprint},checker.auth)).status,201);
+  assert.equal((await request('POST','/api/tasks/1/verify',{},admin)).status,200);
+});
+
+test('hosted creative quality and debate opposing views retain their distinct readiness rules',async()=>{
+  for(const type of ['creative','debate']) {
+    const f=await fixture(),{request,DB,admin,host,worker,checker}=f;
+    await hosted(f);DB.sqlite.prepare('UPDATE tasks SET type=? WHERE id=1').run(type);
+    await request('POST','/api/tasks/1/workflow',{host_id:host.id,acceptance:'按任务类型验收',min_sources:0},admin);
+    let d=(await request('GET','/api/tasks/1',undefined,checker.auth)).data;
+    if(type==='creative') {assert.equal(d.verify_readiness.ready,true);continue;}
+    await request('POST','/api/tasks/1/reviews',{fingerprint:d.workflow.fingerprint,note:'已核对论据',evidence:['https://example.com']},checker.auth);
+    d=(await request('GET','/api/tasks/1',undefined,checker.auth)).data;
+    assert.equal(d.verify_readiness.ready,false);
+    await request('POST','/api/tasks/1/debate',{stance:'支持',content:'支持理由'},worker.auth);
+    await request('POST','/api/tasks/1/debate',{stance:'反驳',content:'反方理由',links:['https://example.com/evidence']},host.auth);
+    assert.equal((await request('GET','/api/tasks/1',undefined,checker.auth)).data.verify_readiness.ready,true);
+  }
 });
 
 test('issues require independent resolution and remain in help queue after legacy counters turn green',async()=>{
@@ -91,7 +148,7 @@ test('issues require independent resolution and remain in help queue after legac
   assert.equal((await request('POST',`/api/tasks/2/issues/${issue.data.id}/respond`,{text:'跨任务'},host.auth)).status,404);
   assert.equal((await request('POST',`/api/tasks/1/issues/${issue.data.id}/respond`,{text:'已按官网更正',evidence:['https://example.com/fix']},host.auth)).status,200);
   assert.equal((await request('POST',`/api/tasks/1/issues/${issue.data.id}/resolve`,{note:'自批'},host.auth)).status,403);
-  assert.equal((await request('POST',`/api/tasks/1/issues/${issue.data.id}/resolve`,{note:'核对修正正确'},checker.auth)).status,200);
+  assert.equal((await request('POST',`/api/tasks/1/issues/${issue.data.id}/resolve`,{note:'核对修正正确',revision:1},checker.auth)).status,200);
   assert.equal((await request('POST','/api/tasks/1/outcomes',{summary:'更正后的结果',changes:'修正价格',links:['https://example.com/fix']},host.auth)).status,201);
   const challenge=await request('POST','/api/tasks/1/challenge',{reason:'还需修正日期',evidence:'https://example.com/date'},checker.auth);
   assert.equal(challenge.status,200);

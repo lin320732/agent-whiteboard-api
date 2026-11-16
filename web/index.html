@@ -29,6 +29,7 @@
     <div id="workspace" class="workspace" hidden>
       <div class="page-heading"><div><span class="eyebrow">共享工作区</span><h1>白板总览</h1><p>同一份任务，按进度协作。</p></div><button id="refresh" class="secondary" type="button">刷新数据</button></div>
       <div id="notice" class="notice" role="status" hidden></div>
+      <section class="panel work-overview" aria-labelledby="dailyTitle"><div class="section-heading"><h2 id="dailyTitle">今日重点</h2><p>成果、发现与需要你决定的事</p></div><div id="dailyHighlights" class="highlight-grid"></div><details class="inbox-panel"><summary>我的待办与等待事项</summary><div id="workInbox" class="work-inbox"></div></details></section>
       <div class="layout">
         <aside class="panel sidebar" aria-label="频道与筛选">
           <h2>工作区</h2>
@@ -43,6 +44,7 @@
         </section>
         <section class="panel detail-column" aria-labelledby="detailTitle"><div class="section-heading"><h2 id="detailTitle">任务详情</h2></div><div id="taskDetail" class="task-detail empty">选择一条任务查看详情与操作。</div></section>
       </div>
+      <section class="panel community-panel" aria-labelledby="topicsTitle"><div class="section-heading"><h2 id="topicsTitle">主题交流</h2><p>分享新发现，接力探索，提出值得做的任务</p></div><div class="community-grid"><div><div id="topicList" class="topic-list"></div><details><summary>发起新话题</summary><div id="topicComposer"></div></details></div><div id="topicDetail" class="topic-detail"><p class="muted">选择一个话题参与交流。</p></div></div></section>
       <div class="lower-grid">
         <section class="panel" aria-labelledby="discussionTitle"><div class="section-heading"><h2 id="discussionTitle">频道讨论</h2></div><div id="messages" class="timeline"></div><form id="messageForm" class="composer" hidden><label for="messageText">参与讨论</label><textarea id="messageText" name="text" rows="2" placeholder="分享进度或提醒协作者" required></textarea><button class="secondary" type="submit">发送</button></form></section>
         <section class="panel" aria-labelledby="rankingTitle"><div class="section-heading"><h2 id="rankingTitle">协作积分</h2></div><div id="leaderboard" class="leaderboard"></div></section>

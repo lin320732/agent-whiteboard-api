@@ -31,30 +31,30 @@
 **Files:** Create `src/collaboration-schema.js`, `src/collaboration.js`, `migrations/0004-hosted-collaboration.sql`, `test/collaboration.test.mjs`, `test/helpers.mjs`; modify `src/index.js`.
 **Interfaces:** `initCollaboration(db)`, `collaborationRoute(request, env, principal, path)` returns Response or null; `decorateCollaboration(db, task, context, readiness, collaboration)` enriches task/detail and readiness. `/api/tasks/:id/workflow` sets host/acceptance via admin; `/outcomes`, `/reviews`, `/issues`, `/issues/:issueId/{respond,resolve}`; `/subtasks`, `/subtasks/:subtaskId/{accept,decline,wait,submit,check,reassign,remind}`. GET `/api/inbox` returns identity-specific actionable work and `/api/participants` active Agents.
 
-- [ ] Write failing real SQLite-backed tests for host rights, distinct reviewer, changed evidence invalidating review, issue resolution, legacy challenge queue, 3 slots, waiting and reassignment.
-- [ ] Implement additive schema, auth-gated routes, consistent context decoration and versioned review/outcome rules.
-- [ ] Run new and existing Node tests and local Worker regression; commit.
+- [x] Write failing real SQLite-backed tests for host rights, distinct reviewer, changed evidence invalidating review, issue resolution, legacy challenge queue, 3 slots, waiting and reassignment.
+- [x] Implement additive schema, auth-gated routes, consistent context decoration and versioned review/outcome rules.
+- [x] Run new and existing Node tests and local Worker regression; commit.
 
 ### Task 2: Topic exploration and contribution API
 
 **Files:** Extend `src/collaboration.js`, schema/migration, `test/collaboration.test.mjs`; add `src/community.js`.
 **Interfaces:** `/api/topics`, `/api/topics/:id/replies`, `/api/topics/:id/propose`; `/api/tasks/:id/contributions`, `/api/tasks/:id/contributions/:creditId/confirm`; `/api/digest` returns up to 3 sourced current highlights and pending admin decisions. Topic proposals create the existing `proposed` task state; contribution records attach to outcome versions and real same-task source records.
 
-- [ ] Write failing tests for daily topic cap, thread boundaries, proposal approval, source validation and no self-confirmed contribution.
-- [ ] Implement thread/proposal routes, contribution records, activity-based digest; no invented AI summaries.
-- [ ] Run Node suites; commit.
+- [x] Write failing tests for daily topic cap, thread boundaries, proposal approval, source validation and no self-confirmed contribution.
+- [x] Implement thread/proposal routes, contribution records, activity-based digest; no invented AI summaries.
+- [x] Run Node suites; commit.
 
 ### Task 3: Collaboration UI and Agent handoff
 
 **Files:** Create `web/collaboration.js`; modify `web/app.js`, `web/index.html`, `web/style.css`; create `test/hosted-ui.playwright.js`; update README and `docs/AGENT_LOOP.md`.
 **Interfaces:** Module imports a UI context with `api`, `node`, `linkedText`, `button`, current user and refresh callback. Task view shows outcomes, blockers, host settings, subtasks, independent checks and contributions; homepage shows digest and topic threads. Documentation specifies inbox polling and actions using individual tokens.
 
-- [ ] Add browser fixture covering workflow setup, outcome/review/issue and subtask controls, topic/reply/proposal, viewer restrictions and mobile layout.
-- [ ] Implement UI with inline forms and errors; preserve drafts on failed requests, safe text and existing task conversation.
-- [ ] Run all browser fixtures, Node tests and both Wrangler dry-runs; commit.
+- [x] Add browser fixture covering workflow setup, outcome/review/issue and subtask controls, topic/reply/proposal, viewer restrictions and mobile layout.
+- [x] Implement UI with inline forms and errors; preserve drafts on failed requests, safe text and existing task conversation.
+- [x] Run all browser fixtures, Node tests and both Wrangler dry-runs; commit.
 
 ### Release
 
-- [ ] Self-review full diff (no subagent tool), fix actionable findings and run relevant checks.
+- [x] Self-review full diff (no subagent tool), fix actionable findings and run relevant checks.
 - [ ] Recheck origin/main, back up remote D1, apply only migration 0004, push main, deploy API then board.
 - [ ] Read-only authenticated live checks, live asset comparison, cleanup test session; do not create production posts or assign real Agents during checks.

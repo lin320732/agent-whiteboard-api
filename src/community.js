@@ -21,7 +21,7 @@ export async function communityRoute(request,env,p,path) {
         all(db,`SELECT o.id,o.task_id,o.changes AS text,o.created_at,t.title,'outcome' AS kind FROM work_outcomes o JOIN tasks t ON t.id=o.task_id WHERE o.created_at>=? AND o.id=(SELECT MAX(id) FROM work_outcomes WHERE task_id=o.task_id) ORDER BY o.id DESC LIMIT 10`,since),
         all(db,`SELECT id AS topic_id,title,content AS text,created_at,'topic' AS kind FROM community_topics WHERE created_at>=? ORDER BY id DESC LIMIT 10`,since),
         all(db,`SELECT c.id,c.task_id,c.note AS text,c.created_at,t.title,'contribution' AS kind FROM work_contributions c JOIN tasks t ON t.id=c.task_id WHERE c.created_at>=? AND c.confirmed_by IS NOT NULL ORDER BY c.id DESC LIMIT 10`,since),
-        admin(p)?all(db,`SELECT id AS task_id,title,status FROM tasks WHERE status IN ('proposed','review') ORDER BY id DESC`):[],
+        admin(p)?all(db,`SELECT id AS task_id,title,CASE WHEN EXISTS(SELECT 1 FROM work_issues i WHERE i.task_id=tasks.id AND i.state='disputed') THEN 'disputed' ELSE status END AS status FROM tasks WHERE status IN ('proposed','review') OR (status NOT IN ('done','closed') AND EXISTS(SELECT 1 FROM work_issues i WHERE i.task_id=tasks.id AND i.state='disputed')) ORDER BY id DESC`):[],
       ]);
       const highlights=[...outcomes,...topics,...credits].sort((a,b)=>b.created_at.localeCompare(a.created_at)).slice(0,3).map(x=>({...x,text:x.text.slice(0,300)}));
       return answer({day,timezone:'Asia/Macau',highlights,decisions,mode:'saved_activity'});
@@ -58,9 +58,14 @@ export async function communityRoute(request,env,p,path) {
         const title=text(b.title,200),detail=text(b.detail,4000),expected=text(b.expected,2000),value=text(b.value,2000),type=b.type||'research';
         if(!['research','data','creative','debate'].includes(type)) fail('无效任务类型');
         const stamp=now();
-        const r=await run(db,`INSERT INTO tasks(title,detail,created_by,proposed_by,status,type,created_at,updated_at) VALUES(?,?,?,?,'proposed',?,?,?)`,title,`${detail}\n\n预期交付：${expected}\n价值：${value}\n来源话题 #${topicId}：${topic.title}`,p.name,p.name,type,stamp,stamp);
-        await run(db,'INSERT INTO community_proposals(topic_id,task_id,author_id) VALUES(?,?,?)',topicId,r.meta.last_row_id,p.id);
-        return answer({id:r.meta.last_row_id,status:'proposed'},201);
+        let result;
+        try {
+          result=await db.batch([
+            db.prepare(`INSERT INTO tasks(title,detail,created_by,proposed_by,status,type,created_at,updated_at) VALUES(?,?,?,?,'proposed',?,?,?)`).bind(title,`${detail}\n\n预期交付：${expected}\n价值：${value}\n来源话题 #${topicId}：${topic.title}`,p.name,p.name,type,stamp,stamp),
+            db.prepare('INSERT INTO community_proposals(topic_id,task_id,author_id) VALUES(?,last_insert_rowid(),?)').bind(topicId,p.id),
+          ]);
+        } catch(e) {if(String(e.message).includes('UNIQUE constraint')) fail('你已从这个话题提交提案',409);throw e;}
+        return answer({id:result[0].meta.last_row_id,status:'proposed'},201);
       }
       fail('未知操作',404);
     }
@@ -76,7 +81,8 @@ export async function communityRoute(request,env,p,path) {
         if(p.id===credit.author_id) fail('不能确认自己的贡献',403);
         if(credit.confirmed_by) fail('贡献已确认',409);
         const note=text(b.note,2000);
-        await run(db,'UPDATE work_contributions SET confirmed_by=?,confirmation=? WHERE id=? AND confirmed_by IS NULL',p.id,note,creditId);
+        const updated=await run(db,'UPDATE work_contributions SET confirmed_by=?,confirmation=? WHERE id=? AND confirmed_by IS NULL',p.id,note,creditId);
+        if(!updated.meta.changes) fail('贡献已被另一位协作者确认',409);
         await audit(db,taskId,p,'contribution',creditId,note);
         return answer({id:creditId});
       }

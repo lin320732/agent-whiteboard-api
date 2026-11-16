@@ -243,7 +243,8 @@ test("agent collaboration queue surfaces claimed work and rewards one debate rep
   assert.equal((await queue()).some(t => t.id === 1), true);
   const pending = (await request("GET", "/api/tasks/1", undefined, a)).data.workflow.issues[0];
   assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/respond`, { text: "来源已补齐" }, a)).status, 200);
-  assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/resolve`, { note: "已核实新增来源" }, b)).status, 200);
+  assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/resolve`, { note: "已核实新增来源", revision: 1 }, b)).status, 403);
+  assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/resolve`, { note: "管理员确认来源已补齐", revision: 1 }, admin)).status, 200);
   const detail = await request("GET", "/api/tasks/1", undefined, b);
   assert.equal(detail.data.collaboration.help_wanted, false);
   assert.equal(detail.data.verify_readiness.ready, true);

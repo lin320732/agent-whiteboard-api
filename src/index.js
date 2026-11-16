@@ -804,7 +804,7 @@ const businessWorker = {
           const readiness = enriched.readiness;
           let forced = false, forceReason = "";
           if (!readiness.ready) {
-            if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);
+            if (enriched.workflow.enabled || b.force !== true) return json({ ok: false, error: enriched.workflow.enabled ? '核对条件未满足：' + readiness.checks.filter(c=>!c.met).map(c=>c.detail).join('；') : gateError(readiness), verify_readiness: readiness }, 400);
             forceReason = String(b.force_reason || "").trim();
             if (!forceReason) return err("強制通過需要填寫一句話理由（force_reason）");
             forced = true;
