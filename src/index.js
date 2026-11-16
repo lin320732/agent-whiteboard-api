@@ -1,4 +1,6 @@
 import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
+import { initCollaboration } from "./collaboration-schema.js";
+import { collaborationRoute, decorateCollaboration } from "./collaboration.js";
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -439,6 +441,7 @@ async function initializeDatabase(env) {
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
+  await initCollaboration(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
@@ -583,6 +586,8 @@ const businessWorker = {
     if (useDb) {
       const handled = await authRoute(request, env, principal, path);
       if (handled) return handled;
+      const workResponse = await collaborationRoute(request, env, principal, path);
+      if (workResponse) return workResponse;
     }
     const action = routeAction(request.method, path);
     const migrationRead = action === "read" && env.ALLOW_PUBLIC_READ === "true" && request.headers.get("X-Whiteboard-Require-Auth") !== "1";
@@ -639,8 +644,10 @@ const businessWorker = {
         for (const t of r.results) {
           const ctx = await loadTaskContext(env, true, t.id);
           const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-          t.verify_readiness = readiness;
-          t.collaboration = computeCollaboration(t, readiness, ctx);
+          const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx));
+          t.verify_readiness = enriched.readiness;
+          t.collaboration = enriched.collaboration;
+          t.host = enriched.workflow.host;
         }
         const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
         return json({ ok: true, tasks });
@@ -686,7 +693,8 @@ const businessWorker = {
       if (!ctx) return err("任務不存在", 404);
       const { task, challenges, supplements, debate, eventAgents, forceApprovals } = ctx;
       const readiness = computeReadiness(task, challenges, supplements, eventAgents, debate);
-      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: readiness, collaboration: computeCollaboration(task, readiness, ctx), force_approvals: forceApprovals });
+      const enriched = useDb ? await decorateCollaboration(env.DB, task, ctx, readiness, computeCollaboration(task, readiness, ctx)) : { readiness, collaboration: computeCollaboration(task, readiness, ctx) };
+      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: enriched.readiness, collaboration: enriched.collaboration, workflow: enriched.workflow, force_approvals: forceApprovals });
     }
 
     // ---- 質疑 / 補充列表 ----
@@ -788,7 +796,9 @@ const businessWorker = {
           if (cur.status !== "review") return err(`只能核對待核對的任務，現在是 ${cur.status}`);
           // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
           const ctx = await loadTaskContext(env, true, id);
-          const readiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+          const legacyReadiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+          const enriched = await decorateCollaboration(env.DB, cur, ctx, legacyReadiness, computeCollaboration(cur, legacyReadiness, ctx));
+          const readiness = enriched.readiness;
           let forced = false, forceReason = "";
           if (!readiness.ready) {
             if (b.force !== true) return json({ ok: false, error: gateError(readiness), verify_readiness: readiness }, 400);

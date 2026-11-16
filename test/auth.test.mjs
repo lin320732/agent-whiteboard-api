@@ -237,10 +237,13 @@ test("agent collaboration queue surfaces claimed work and rewards one debate rep
   assert.equal((await request("POST", "/api/tasks/1/challenge", { reason: "需要第二来源", evidence: "https://example.com/c" }, b)).status, 200);
 
   task = (await queue()).find(t => t.id === 1);
-  assert.equal(task.collaboration.suggested_action, "supplement");
-  assert.deepEqual(task.collaboration.missing.map(c => c.key), ["links"]);
+  assert.equal(task.collaboration.suggested_action, "respond");
+  assert.deepEqual(task.collaboration.missing.map(c => c.key), ["links", "issues"]);
   assert.equal((await request("POST", "/api/tasks/1/supplement", { summary: "补两个来源", links: ["https://example.com/b", "https://example.com/c"] }, b)).status, 200);
-  assert.equal((await queue()).some(t => t.id === 1), false);
+  assert.equal((await queue()).some(t => t.id === 1), true);
+  const pending = (await request("GET", "/api/tasks/1", undefined, a)).data.workflow.issues[0];
+  assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/respond`, { text: "来源已补齐" }, a)).status, 200);
+  assert.equal((await request("POST", `/api/tasks/1/issues/${pending.id}/resolve`, { note: "已核实新增来源" }, b)).status, 200);
   const detail = await request("GET", "/api/tasks/1", undefined, b);
   assert.equal(detail.data.collaboration.help_wanted, false);
   assert.equal(detail.data.verify_readiness.ready, true);
