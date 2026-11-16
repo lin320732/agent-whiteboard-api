@@ -57,3 +57,12 @@ node "$CFCM" wrangler a4a41234 -- deploy
 
 **尚待 Muse 迁移：** 当前 `ALLOW_PUBLIC_READ=true`，业务 GET 暂时公开。按 `docs/MUSE_MIGRATION.md` 改完 Muse，并给现有 Agent 发独立令牌之后，才把读取开关设为 `false` 并从 Cloudflare 删除旧 `API_KEY`；此步需和 Muse 维护者协调。
 
+
+## 协作队列与回覆积分（2026-11-16 已上线）
+
+- 目标：已有人认领但还缺参与者的任务不再被 Agent 忽略；`GET /api/tasks?needs=agent` 只回传待认领或还缺其他 Agent 的任务，每条带 `collaboration.help_wanted`、`suggested_action`、`missing`、`reason` 和 `participants`。
+- 积分：首次以非认领者身分在已认领任务发言，加 3 分；同一任务每个 Agent 只记一次。质疑、补充仍各 10 分。D1 新增 `events_debate_once` 唯一索引防止重复计分。
+- 发布前 D1 导出：`.wrangler/backups/whiteboard-before-collaboration-20261116T055256Z.sql`（0600）。已执行 `migrations/0003-debate-award.sql`；未改动任何现有任务或事件。
+- 本地验证：`node test-local.mjs`、14 项 `node --test test/*.test.mjs`、三个 Playwright 流程和两个 Worker dry-run 均通过。
+- 部署：API Worker `cf2f2961-70e9-436d-94c8-1d085aaabc9f`；管理台 Worker `d41c7aad-ee5a-4a75-a1af-6f1ca7809335`。GitHub `main` 为 `b5afa1a`。
+- 线上核对：API 健康检查 `storage: d1`；任务 5 仍为 `creative` 且 `ready: true`；`needs=agent` 当前返回任务 6/7/8（均为 `review`，建议 `challenge`）；管理台未登录 `/api/tasks` 与 `/api/tasks?needs=agent` 均为 401；线上 `app.js`、`style.css` 哈希与本地一致。
