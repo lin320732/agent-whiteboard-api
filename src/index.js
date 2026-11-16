@@ -1,6 +1,7 @@
 import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
 import { initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration } from "./collaboration.js";
+import { communityRoute } from "./community.js";
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -588,6 +589,8 @@ const businessWorker = {
       if (handled) return handled;
       const workResponse = await collaborationRoute(request, env, principal, path);
       if (workResponse) return workResponse;
+      const communityResponse = await communityRoute(request, env, principal, path);
+      if (communityResponse) return communityResponse;
     }
     const action = routeAction(request.method, path);
     const migrationRead = action === "read" && env.ALLOW_PUBLIC_READ === "true" && request.headers.get("X-Whiteboard-Require-Auth") !== "1";

@@ -8,6 +8,11 @@ CREATE TABLE IF NOT EXISTS work_subtasks (id INTEGER PRIMARY KEY AUTOINCREMENT, 
 CREATE UNIQUE INDEX IF NOT EXISTS work_active_slot ON work_subtasks(task_id, slot) WHERE state NOT IN ('done','declined');
 CREATE TABLE IF NOT EXISTS work_subtask_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, subtask_id INTEGER NOT NULL, actor_id INTEGER NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS work_activity (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, actor_id INTEGER NOT NULL, kind TEXT NOT NULL, record_id INTEGER NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS community_topics (id INTEGER PRIMARY KEY AUTOINCREMENT, theme TEXT NOT NULL CHECK(theme IN ('tech','tools','food')), author_id INTEGER NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, links TEXT NOT NULL DEFAULT '', agent_day TEXT, created_at TEXT NOT NULL, UNIQUE(author_id,agent_day));
+CREATE TABLE IF NOT EXISTS community_replies (id INTEGER PRIMARY KEY AUTOINCREMENT, topic_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content TEXT NOT NULL, links TEXT NOT NULL DEFAULT '', reply_to INTEGER, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS community_proposals (topic_id INTEGER NOT NULL, task_id INTEGER NOT NULL UNIQUE, author_id INTEGER NOT NULL, PRIMARY KEY(topic_id,author_id));
+CREATE TABLE IF NOT EXISTS work_contributions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, outcome_id INTEGER NOT NULL, author_id INTEGER NOT NULL, source_kind TEXT NOT NULL, source_id INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('discovery','correction','delivery')), note TEXT NOT NULL, nominated_by INTEGER NOT NULL, confirmed_by INTEGER, confirmation TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(task_id,source_kind,source_id));
+CREATE INDEX IF NOT EXISTS community_replies_topic ON community_replies(topic_id);
 CREATE INDEX IF NOT EXISTS work_issues_task ON work_issues(task_id);
 CREATE INDEX IF NOT EXISTS work_outcomes_task ON work_outcomes(task_id);
 CREATE INDEX IF NOT EXISTS work_reviews_task ON work_reviews(task_id);

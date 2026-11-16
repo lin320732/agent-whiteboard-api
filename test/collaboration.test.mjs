@@ -1,6 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './helpers.mjs';
+import { readFileSync } from 'node:fs';
+
+test('topics enforce a Macau-day cap, keep replies in their thread and turn discussion into an unapproved proposal',async()=>{
+  const {request,DB,admin,host,worker}=await fixture();
+  assert.equal((await request('GET','/api/topics')).status,401);
+  const topic=await request('POST','/api/topics',{theme:'tools',title:'廉价服务器的新用法',content:'试做报告自动汇总器'},host.auth);
+  assert.equal(topic.status,201);
+  assert.equal((await request('POST','/api/topics',{theme:'food',title:'另开',content:'同一天再开话题'},host.auth)).status,429);
+  const other=await request('POST','/api/topics',{theme:'food',title:'食材替代',content:'在澳门做世界美食'},worker.auth);
+  const reply=await request('POST',`/api/topics/${topic.data.id}/replies`,{content:'可先做小样'},worker.auth);
+  assert.equal(reply.status,201);
+  assert.equal((await request('POST',`/api/topics/${other.data.id}/replies`,{content:'跨串引用',reply_to:reply.data.id},host.auth)).status,404);
+  const proposed=await request('POST',`/api/topics/${topic.data.id}/propose`,{title:'自动报告小样',detail:'沿用闲置服务器',expected:'一份可运行演示',value:'减少人工整理',type:'data'},host.auth);
+  assert.equal(proposed.status,201);
+  assert.equal(proposed.data.status,'proposed');
+  assert.equal((await request('POST',`/api/tasks/${proposed.data.id}/approve`,{},host.auth)).status,403);
+  assert.equal((await request('POST',`/api/tasks/${proposed.data.id}/approve`,{},admin)).status,200);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM events WHERE type=\'debate\'').get().n,0);
+  const detail=(await request('GET',`/api/topics/${topic.data.id}`,undefined,host.auth)).data;
+  assert.equal(detail.proposals[0].id,proposed.data.id);
+  const digest=(await request('GET','/api/digest',undefined,admin)).data;
+  assert.ok(digest.highlights.length<=3);
+  assert.ok(digest.highlights.every(x=>x.task_id||x.topic_id));
+});
+
+test('adopted contributions refer to real task evidence, require independent confirmation and cannot double count',async()=>{
+  const f=await fixture(),{request,host,worker,checker}=f;
+  await hosted(f);
+  const debate=await request('POST','/api/tasks/1/debate',{stance:'补充',content:'发现续费差异'},worker.auth);
+  const outcome=await request('POST','/api/tasks/1/outcomes',{summary:'采用续费差异',changes:'补充总成本',links:['https://example.com'],source_refs:[{kind:'debate',id:debate.data.message.id}]},host.auth);
+  assert.equal(outcome.status,201);
+  const body={outcome_id:outcome.data.id,source_kind:'debate',source_id:debate.data.message.id,kind:'discovery',note:'发现影响总成本的续费差异'};
+  assert.equal((await request('POST','/api/tasks/1/contributions',{...body,source_id:9999},host.auth)).status,404);
+  const credit=await request('POST','/api/tasks/1/contributions',body,host.auth);
+  assert.equal(credit.status,201);
+  assert.equal((await request('POST',`/api/tasks/1/contributions/${credit.data.id}/confirm`,{note:'自己确认'},worker.auth)).status,403);
+  assert.equal((await request('POST',`/api/tasks/1/contributions/${credit.data.id}/confirm`,{note:'在成果中已核实采用'},checker.auth)).status,200);
+  assert.equal((await request('POST','/api/tasks/1/contributions',body,host.auth)).status,409);
+  const records=(await request('GET','/api/tasks/1/contributions',undefined,checker.auth)).data.contributions;
+  assert.equal(records.length,1);assert.equal(records[0].confirmed_by,checker.id);assert.equal(records[0].author_id,worker.id);
+});
+
+test('hosted migration applies twice without touching historical task and event rows',async()=>{
+  const {DB}=await fixture();
+  const before=DB.sqlite.prepare('SELECT * FROM tasks ORDER BY id').all();
+  const sql=readFileSync(new URL('../migrations/0004-hosted-collaboration.sql',import.meta.url),'utf8');
+  DB.sqlite.exec(sql);DB.sqlite.exec(sql);
+  assert.deepEqual(DB.sqlite.prepare('SELECT * FROM tasks ORDER BY id').all(),before);
+});
 
 async function hosted(f) {
   const {request,admin,host,worker}=f;
