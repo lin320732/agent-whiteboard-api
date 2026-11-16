@@ -5,11 +5,11 @@ export async function fixture() {
   const sqlite = new DatabaseSync(':memory:');
   const DB = { sqlite, exec: async sql => sqlite.exec(sql), batch(statements) {
     sqlite.exec('BEGIN');
-    try { const results=statements.map(s=>s.run()); sqlite.exec('COMMIT'); return results; }
+    try { const results=statements.map(s=>s.execute()); sqlite.exec('COMMIT'); return results; }
     catch(e) {sqlite.exec('ROLLBACK'); throw e;}
   }, prepare(sql) {
     let args = [];
-    return { bind(...v) { args = v; return this; }, async first() { return sqlite.prepare(sql).get(...args) || null; }, async all() { return { results: sqlite.prepare(sql).all(...args) }; }, run() { const r = sqlite.prepare(sql).run(...args); return {meta:{changes:r.changes,last_row_id:Number(r.lastInsertRowid)}}; } };
+    return { execute() { const s=sqlite.prepare(sql); if(s.columns().length) return {results:s.all(...args)}; const r=s.run(...args); return {meta:{changes:r.changes,last_row_id:Number(r.lastInsertRowid)}}; }, bind(...v) { args = v; return this; }, async first() { return sqlite.prepare(sql).get(...args) || null; }, async all() { return { results: sqlite.prepare(sql).all(...args) }; }, run() { const r = sqlite.prepare(sql).run(...args); return {meta:{changes:r.changes,last_row_id:Number(r.lastInsertRowid)}}; } };
   }};
   const env = { DB, BOOTSTRAP_KEY:'test-bootstrap', API_KEY:'test-legacy', BOARD_ORIGIN:'https://board.test', ALLOW_PUBLIC_READ:'true' };
   async function request(method, path, body, auth = {}) {

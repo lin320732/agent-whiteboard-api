@@ -4,6 +4,11 @@ export class WorkError extends Error { constructor(message, status = 400) { supe
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
 export const answer = (data, status = 200) => new Response(JSON.stringify({ok:true,...data}), {status,headers:{'Content-Type':'application/json','Cache-Control':'no-store','Access-Control-Allow-Origin':'*'}});
 export const all = async (db, sql, ...args) => (await db.prepare(sql).bind(...args).all()).results;
+export async function readBatch(db, queries) {
+  const statements=queries.map(([sql,...args])=>db.prepare(sql).bind(...args));
+  const results=db.batch?await db.batch(statements):await Promise.all(statements.map(s=>s.all()));
+  return results.map(r=>r.results);
+}
 export const first = (db, sql, ...args) => db.prepare(sql).bind(...args).first();
 export const run = (db, sql, ...args) => db.prepare(sql).bind(...args).run();
 export const now = () => new Date().toISOString();
@@ -42,23 +47,24 @@ export async function sourceRef(db, taskId, ref) {
 }
 export async function workflowContext(db, task) {
   await syncIssues(db,task.id);
-  const [profile,issues,subtasks,outcomes,people,subtaskEvents]=await Promise.all([
-    first(db,'SELECT * FROM task_workflows WHERE task_id=?',task.id),
-    all(db,'SELECT * FROM work_issues WHERE task_id=? ORDER BY id',task.id),
-    all(db,'SELECT * FROM work_subtasks WHERE task_id=? ORDER BY id',task.id),
-    all(db,'SELECT * FROM work_outcomes WHERE task_id=? ORDER BY id DESC',task.id),
-    all(db,`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`),
-    all(db,'SELECT * FROM work_subtask_events WHERE task_id=? ORDER BY id',task.id),
+  const [profiles,issues,subtasks,outcomes,people,subtaskEvents,contributors,reviews]=await readBatch(db,[
+    ['SELECT * FROM task_workflows WHERE task_id=?',task.id],
+    ['SELECT * FROM work_issues WHERE task_id=? ORDER BY id',task.id],
+    ['SELECT * FROM work_subtasks WHERE task_id=? ORDER BY id',task.id],
+    ['SELECT * FROM work_outcomes WHERE task_id=? ORDER BY id DESC',task.id],
+    [`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`],
+    ['SELECT * FROM work_subtask_events WHERE task_id=? ORDER BY id',task.id],
+    [`SELECT DISTINCT p.id FROM supplements s JOIN principals p ON p.name=s.agent WHERE s.task_id=?`,task.id],
+    [`SELECT r.*,COALESCE(l.display_name,p.name) AS reviewer FROM work_reviews r JOIN principals p ON p.id=r.reviewer_id LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE r.task_id=? ORDER BY r.id DESC`,task.id],
   ]);
+  const profile=profiles[0]||null;
   const names=new Map(people.map(p=>[p.id,p.name]));
   for(const i of issues) { i.author=names.get(i.author_id)||'历史记录';i.responder=names.get(i.responder_id)||'';i.resolver=names.get(i.resolver_id)||''; }
   for(const s of subtasks) {s.history=subtaskEvents.filter(e=>e.subtask_id===s.id).map(e=>({...e,actor:names.get(e.actor_id)||'历史账号',detail:JSON.parse(e.detail||'{}')}));s.assignee=names.get(s.assignee_id)||'未知账号';s.assignee_active=!!people.find(p=>p.id===s.assignee_id)?.active;s.ack_overdue=s.state==='assigned'&&Date.now()-Date.parse(s.assigned_at)>=7200000;s.overdue=['accepted','waiting'].includes(s.state)&&Date.parse(s.resume_at||s.due_at)<=Date.now();}
   for(const o of outcomes) {o.author=names.get(o.author_id)||'未知账号';o.source_refs=JSON.parse(o.source_refs);}
   const outcome=outcomes[0]||null;
-  const contributors=await all(db,`SELECT DISTINCT p.id FROM supplements s JOIN principals p ON p.name=s.agent WHERE s.task_id=?`,task.id);
   const fingerprint=await hashSecret(JSON.stringify({summary:task.result_summary,links:task.result_links,claimant:task.claimed_by,profile:profile?{host_id:profile.host_id,acceptance:profile.acceptance,min_sources:profile.min_sources}:null,outcome:outcome?.id||null,issues:issues.map(i=>({id:i.id,text:i.text,response:i.response,evidence:i.evidence}))}));
   const authors=new Set([profile?.host_id,outcome?.author_id,...contributors.map(p=>p.id),...(outcome?.source_refs||[]).map(s=>s.author_id),...people.filter(p=>p.actor===task.claimed_by).map(p=>p.id)].filter(Boolean));
-  const reviews=await all(db,`SELECT r.*,COALESCE(l.display_name,p.name) AS reviewer FROM work_reviews r JOIN principals p ON p.id=r.reviewer_id LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE r.task_id=? ORDER BY r.id DESC`,task.id);
   const independent=reviews.filter(r=>r.fingerprint===fingerprint&&!authors.has(r.reviewer_id));
   return {enabled:!!profile,waiting:!!profile?.resume_at&&Date.parse(profile.resume_at)>Date.now(),resume_at:profile?.resume_at||null,wait_reason:profile?.wait_reason||'',host_id:profile?.host_id||null,host: names.get(profile?.host_id)||'',acceptance:profile?.acceptance||'',min_sources:profile?.min_sources??1,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length};
 }

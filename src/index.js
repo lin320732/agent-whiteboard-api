@@ -1,6 +1,6 @@
 import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
 import { initCollaboration } from "./collaboration-schema.js";
-import { collaborationRoute, decorateCollaboration } from "./collaboration.js";
+import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
@@ -363,13 +363,16 @@ function gateError(readiness) {
 // 讀一條任務的全部上下文（任務、質疑、補充、辯論、參與事件、強制通過記錄）
 async function loadTaskContext(env, useDb, id) {
   if (useDb) {
-    const task = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
+    const [tasks,challenges,supplements,debate,ev,forceApprovals] = await readBatch(env.DB,[
+      ['SELECT * FROM tasks WHERE id=?',id],
+      ['SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC',id],
+      ['SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC',id],
+      ['SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC',id],
+      ["SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')",id],
+      ['SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC',id],
+    ]);
+    const task=tasks[0];
     if (!task) return null;
-    const challenges = (await env.DB.prepare("SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-    const supplements = (await env.DB.prepare("SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-    const debate = (await env.DB.prepare("SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
-    const ev = (await env.DB.prepare("SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')").bind(id).all()).results;
-    const forceApprovals = (await env.DB.prepare("SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC").bind(id).all()).results;
     return { task, challenges, supplements, debate, eventAgents: ev.map(r => r.agent), forceApprovals };
   }
   const task = mem.tasks.find(x => x.id === id);
@@ -644,13 +647,16 @@ const businessWorker = {
         if (channelId) { sql += " AND channel_id=?"; args.push(Number(channelId)); }
         sql += " ORDER BY id DESC";
         const r = await env.DB.prepare(sql).bind(...args).all();
-        for (const t of r.results) {
-          const ctx = await loadTaskContext(env, true, t.id);
-          const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-          const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx));
-          t.verify_readiness = enriched.readiness;
-          t.collaboration = enriched.collaboration;
-          t.host = enriched.workflow.host;
+        // Bound concurrency to three task contexts; each context batches its D1 reads.
+        for (let offset=0; offset<r.results.length; offset+=3) {
+          await Promise.all(r.results.slice(offset,offset+3).map(async t => {
+            const ctx = await loadTaskContext(env, true, t.id);
+            const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx));
+            t.verify_readiness = enriched.readiness;
+            t.collaboration = enriched.collaboration;
+            t.host = enriched.workflow.host;
+          }));
         }
         const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
         return json({ ok: true, tasks });
