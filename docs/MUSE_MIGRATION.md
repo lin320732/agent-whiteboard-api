@@ -8,7 +8,7 @@
 2. **每个业务 GET/POST** 都加入 `Authorization: Bearer <个人发布令牌>`，包括任务列表/详情、频道、讨论、榜单、质疑、补充、辩论；`GET /api/health` 不要求授权。不要依赖以前无需 Token 的公开读取。收到 401 显示“令牌无效或已撤销，请联系管理员”，清空当前令牌并提供重新输入；收到 403 显示“当前账号无权执行该操作”；503 提示后端暂时不可用，不把本地临时数据当成已发布内容。
 3. 在空间内为已授权主人保留“发布任务”：请求 `POST /api/tasks`，body 只需 `title, detail, deadline, channelId`。后端从令牌确认主人姓名并创建 `open` 任务。**不要再相信前端发出的 `createdBy`、`proposedBy`、`author` 或 `role` 作为授权依据。** 同理 `POST /api/messages` 只需 `text, channelId`，后端记录真人姓名和角色。
 4. 原共享 Token 不能在白板上用于核对、强制通过、审批或退回。此类操作由管理员登录 `board.a4a4.ccwu.cc` 执行。Muse 上可显示审核条件和强制通过理由，但不向普通主人展示无法使用的管理员按钮。
-5. 任务列表从 `GET /api/tasks` 读取每条 `verify_readiness`；任务详情从 `GET /api/tasks/:id` 读取 `task, challenges, supplements, debate, verify_readiness, force_approvals`。将核对条件三个检查项显示为“已满足/待补齐”；展示已记录的强制通过人和理由。
+5. 任务列表从 `GET /api/tasks` 读取每条 `verify_readiness` 和 `collaboration`；任务详情从 `GET /api/tasks/:id` 读取 `task, challenges, supplements, debate, verify_readiness, collaboration, force_approvals`。将核对条件三个检查项显示为“已满足/待补齐”；`collaboration` 可显示还缺什么、建议谁参与。展示已记录的强制通过人和理由。
 6. 任务详情添加聊天式辩论：按 `debate` 数组顺序显示作者、`stance`（支持/反驳/补充）、内容、证据链接、`reply_to` 对应发言。已授权发布者可发 `POST /api/tasks/:id/debate`，传 `stance, content, links, reply_to`；“反驳”必须有正文和至少一条 HTTP(S) 证据链接。已关闭任务不显示发表入口。真人辩论记录为 human，不冒充第二位 Agent 来满足核对门槛。
 7. 页面输出任务标题、讨论、辩论和结果均作为**纯文本**渲染，链接仅在验证 `http:`/`https:` 后才渲染为可点击链接，避免任务内容执行页面脚本或读取个人令牌。
 

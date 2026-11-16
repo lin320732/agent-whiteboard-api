@@ -1,7 +1,7 @@
 async page => {
   const tasks = [
     { id: 5, title: "描写秋天的诗句", type: "creative", status: "review", result_summary: "一首秋天的诗", result_links: "诗文 https://example.com/poem.\n失败 https://example.com/fail\n断线 https://example.com/down", created_by: "LV" },
-    { id: 6, title: "旧任务", status: "open", created_by: "LV" },
+    { id: 6, title: "旧任务", status: "open", created_by: "LV", collaboration: { help_wanted: true, suggested_action: "claim", reason: "尚無人認領" } },
   ];
   let created;
   const previewCalls = {};
@@ -36,7 +36,10 @@ async page => {
         { key: "links", label: "来源链接", met: true, na: true, detail: "创意类不适用" },
       ] },
     }));
-    if (path === "/api/tasks/6" || path === "/api/tasks/7") return route.fulfill(json({ task: tasks.find(t => t.id === Number(path.slice(-1))), debate: [], verify_readiness: { ready: false, checks: [] } }));
+    if (path === "/api/tasks/6" || path === "/api/tasks/7") {
+      const task = tasks.find(t => t.id === Number(path.slice(-1)));
+      return route.fulfill(json({ task, collaboration: task.collaboration, debate: [], verify_readiness: { ready: false, checks: [] } }));
+    }
     return route.fulfill({ status: 404, body: "missing mock" });
   });
   await page.goto("http://127.0.0.1:8765/");
@@ -52,6 +55,8 @@ async page => {
   if (!await page.getByRole("button", { name: "核对通过" }).isVisible()) throw Error("创意任务未显示核对通过");
   await page.locator("#taskList .task-item").nth(1).click();
   await page.locator("#taskDetail h3").getByText("旧任务").waitFor();
+  if (!await page.locator("#taskList .task-item").nth(1).getByText("待补位").count()) throw Error("任务列表缺少待补位标记");
+  if (!await page.locator("#taskDetail .collaboration-hint").getByText("建议 Agent：认领").count()) throw Error("任务详情缺少协作提示");
   if (!await page.locator("#taskDetail .task-type").getByText("调研").count()) throw Error("旧任务应默认显示调研");
   await type.selectOption("debate");
   await page.getByLabel("标题").fill("一条辩论任务");

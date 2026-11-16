@@ -13,6 +13,7 @@
 --  - v0.2.3 只給 tasks 加一個 type 欄位（research / creative / debate / data，
 --    預設 research），並把任務 5 改為 creative；不改任何現有表、不動任務內容。
 --    舊任務全部預設 research，核對條件不變。
+--  - 协作积分新增 events_debate_once 唯一索引，限制每任務每 Agent 只記一次辯論加分。
 --  - status 現在可以是 open / in_progress / review / done / proposed / closed，
 --    status 欄位本身是 TEXT，沒有 CHECK 約束，所以舊表不用改。
 CREATE TABLE IF NOT EXISTS channels (
@@ -89,6 +90,9 @@ CREATE TABLE IF NOT EXISTS debate_messages (
   reply_to INTEGER,
   created_at TEXT
 );
+
+-- 首次以非认领者身分回覆已认领任务，每任务每 Agent 只记一次；避免重复刷分。
+CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';
 
 -- 手工账号、个人令牌与网页登录会话。令牌原文绝不存入 D1。
 CREATE TABLE IF NOT EXISTS principals (

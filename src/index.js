@@ -93,6 +93,7 @@ const POINTS = {
   verify: 10,
   challenge: 10,
   supplement: 10,
+  debate: 3,
   propose_approved: 5,
 };
 
@@ -317,6 +318,40 @@ function computeReadiness(task, challenges, supplements, eventAgents, debate) {
   return { ready: checks.every(c => c.met), checks };
 }
 
+// 给 Agent 的协作提示：任务被认领不等于结束。只列出其他 Agent 真的能补上的缺口。
+const HELPFUL_CHECKS = new Set(["agents", "challenge", "stances", "links"]);
+function computeCollaboration(task, readiness, ctx) {
+  const status = task.status;
+  const actions = [];
+  if (status === "open") actions.push("claim");
+  if (status !== "closed") actions.push("debate");
+  if (status === "review" || status === "done") actions.push("challenge");
+  if (["in_progress", "review", "done"].includes(status)) actions.push("supplement");
+  const missing = (readiness?.checks || []).filter(c => !c.met && !c.na && HELPFUL_CHECKS.has(c.key));
+  const needsClaim = status === "open" && !task.claimed_by;
+  const helps = ["open", "in_progress", "review"].includes(status) && missing.length > 0;
+  let suggested = null;
+  if (needsClaim) suggested = "claim";
+  else if (missing.some(c => c.key === "challenge") && actions.includes("challenge")) suggested = "challenge";
+  else if (missing.some(c => ["challenge", "stances", "agents"].includes(c.key)) && actions.includes("debate")) suggested = "debate";
+  else if (missing.some(c => c.key === "links") && actions.includes("supplement")) suggested = "supplement";
+  const participants = new Set([
+    task.claimed_by,
+    ...(ctx.eventAgents || []),
+    ...(ctx.challenges || []).map(c => c.agent),
+    ...(ctx.supplements || []).map(s => s.agent),
+    ...(ctx.debate || []).filter(d => d.role !== "human").map(d => d.agent),
+  ].filter(Boolean)).size;
+  return {
+    help_wanted: needsClaim || helps,
+    participants,
+    actions,
+    suggested_action: suggested,
+    missing: missing.map(({ key, label, detail }) => ({ key, label, detail })),
+    reason: needsClaim ? "尚無人認領" : missing.map(c => c.detail).join("；"),
+  };
+}
+
 function gateError(readiness) {
   const unmet = readiness.checks.filter(c => !c.met);
   return "核對條件未滿足：" + unmet.map(c => c.detail).join("；") + "。可由負責人強制通過（verify 帶 force: true 與 force_reason 一句話理由）。";
@@ -397,7 +432,8 @@ async function initializeDatabase(env) {
   CREATE TABLE IF NOT EXISTS supplements (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, summary TEXT NOT NULL, links TEXT DEFAULT '', version INTEGER NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);
-  CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);`);
+  CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);
+  CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';`);
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
@@ -431,11 +467,28 @@ async function recordEvent(env, useDb, agent, type, taskId) {
   }
 }
 
+// 只奖励“加入别人已认领的任务”的首次发言；每任务每 Agent 最多一次，避免刷分。
+async function recordDebateAward(env, useDb, principal, agent, task, speakerRole) {
+  if (!["agent", "legacy"].includes(principal.kind) || speakerRole !== "agent") return;
+  if (!task.claimed_by || task.claimed_by === agent) return;
+  const now = new Date().toISOString();
+  try {
+    if (useDb) {
+      await env.DB.prepare("INSERT OR IGNORE INTO events (agent, type, task_id, points, created_at) VALUES (?, 'debate', ?, ?, ?)").bind(agent, task.id, POINTS.debate, now).run();
+    } else if (!mem.events.some(e => e.agent === agent && e.type === "debate" && e.task_id === task.id)) {
+      mem.events.push({ id: mem.nextEvent++, agent, type: "debate", task_id: task.id, points: POINTS.debate, created_at: now });
+    }
+  } catch (error) {
+    // 发言已经写入，积分失败不应让 Agent 重试并产生重复内容。
+    console.error("debate-award", error?.message || String(error));
+  }
+}
+
 function buildLeaderboard(eventRows) {
   const byAgent = Object.create(null);
   for (const e of eventRows) {
     if (!e.agent) continue;
-    const row = byAgent[e.agent] || (byAgent[e.agent] = { agent: e.agent, points: 0, counts: { claim: 0, result: 0, verify: 0, challenge: 0, supplement: 0, propose_approved: 0 } });
+    const row = byAgent[e.agent] || (byAgent[e.agent] = { agent: e.agent, points: 0, counts: { claim: 0, result: 0, verify: 0, challenge: 0, supplement: 0, debate: 0, propose_approved: 0 } });
     row.points += e.points || 0;
     if (e.type in row.counts) row.counts[e.type] += 1;
   }
@@ -456,13 +509,20 @@ function projectDisplayNames(data, labels) {
     if (!task) return;
     for (const field of ["created_by", "proposed_by", "claimed_by"]) showActor(task, field);
     showReadiness(task.verify_readiness);
+    showCollaboration(task.collaboration);
   };
   const namePattern = new RegExp(`([：、；])(${[...labels.keys()].sort((a, b) => b.length - a.length).map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?=[、；（]|$)`, "g");
+  const replaceNames = text => typeof text === "string" ? text.replace(namePattern, (_, separator, actor) => separator + display(actor)) : text;
   function showReadiness(readiness) {
     for (const check of readiness?.checks || []) {
       if (["agents", "challenge", "stances"].includes(check.key))
-        check.detail = check.detail.replace(namePattern, (_, separator, actor) => separator + display(actor));
+        check.detail = replaceNames(check.detail);
     }
+  }
+  function showCollaboration(collaboration) {
+    if (!collaboration) return;
+    collaboration.reason = replaceNames(collaboration.reason);
+    for (const item of collaboration.missing || []) item.detail = replaceNames(item.detail);
   }
   showTask(data.task);
   for (const task of data.tasks || []) showTask(task);
@@ -472,6 +532,7 @@ function projectDisplayNames(data, labels) {
   for (const row of data.messages || []) showActor(row, "author");
   for (const key of ["challenge", "supplement", "message"]) showActor(data[key], "agent");
   showReadiness(data.verify_readiness);
+  showCollaboration(data.collaboration);
   return data;
 }
 
@@ -490,7 +551,7 @@ function routeAction(method, path) {
 
 const ENDPOINTS = [
   "GET /api/channels", "POST /api/channels",
-  "GET /api/tasks?status=open&channelId=1", "POST /api/tasks",
+  "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "POST /api/tasks",
   "GET /api/tasks/:id", "POST /api/tasks/:id/claim", "POST /api/tasks/:id/result",
   "POST /api/tasks/:id/verify", "POST /api/tasks/:id/reopen",
   "POST /api/tasks/:id/challenge", "GET /api/tasks/:id/challenges",
@@ -568,7 +629,7 @@ const businessWorker = {
 
     // ---- 任務列表 / 新增 ----
     if (path === "/api/tasks" && request.method === "GET") {
-      const status = url.searchParams.get("status"), channelId = url.searchParams.get("channelId");
+      const status = url.searchParams.get("status"), channelId = url.searchParams.get("channelId"), needs = url.searchParams.get("needs");
       if (useDb) {
         let sql = "SELECT * FROM tasks WHERE 1=1", args = [];
         if (status) { sql += " AND status=?"; args.push(status); }
@@ -577,17 +638,23 @@ const businessWorker = {
         const r = await env.DB.prepare(sql).bind(...args).all();
         for (const t of r.results) {
           const ctx = await loadTaskContext(env, true, t.id);
-          t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+          const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+          t.verify_readiness = readiness;
+          t.collaboration = computeCollaboration(t, readiness, ctx);
         }
-        return json({ ok: true, tasks: r.results });
+        const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
+        return json({ ok: true, tasks });
       }
       let list = [...mem.tasks].reverse();
       if (status) list = list.filter(t => t.status === status);
       if (channelId) list = list.filter(t => t.channel_id === Number(channelId));
       for (const t of list) {
         const ctx = await loadTaskContext(env, false, t.id);
-        t.verify_readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+        const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
+        t.verify_readiness = readiness;
+        t.collaboration = computeCollaboration(t, readiness, ctx);
       }
+      if (needs === "agent") list = list.filter(t => t.collaboration.help_wanted);
       return json({ ok: true, tasks: list });
     }
     if (path === "/api/tasks" && request.method === "POST") {
@@ -618,7 +685,8 @@ const businessWorker = {
       const ctx = await loadTaskContext(env, useDb, id);
       if (!ctx) return err("任務不存在", 404);
       const { task, challenges, supplements, debate, eventAgents, forceApprovals } = ctx;
-      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: computeReadiness(task, challenges, supplements, eventAgents, debate), force_approvals: forceApprovals });
+      const readiness = computeReadiness(task, challenges, supplements, eventAgents, debate);
+      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: readiness, collaboration: computeCollaboration(task, readiness, ctx), force_approvals: forceApprovals });
     }
 
     // ---- 質疑 / 補充列表 ----
@@ -671,6 +739,7 @@ const businessWorker = {
           }
           const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, name, speakerRole, stance, String(b.content).trim(), links.join("\n"), replyTo != null ? Number(replyTo) : null, now).run();
           const message = await env.DB.prepare("SELECT * FROM debate_messages WHERE id=?").bind(r.meta.last_row_id).first();
+          await recordDebateAward(env, true, principal, name, cur, speakerRole);
           return json({ ok: true, message }, 201);
         }
         const t = mem.tasks.find(x => x.id === id);
@@ -684,6 +753,7 @@ const businessWorker = {
         if (replyTo != null && !mem.debate.some(x => x.id === Number(replyTo) && x.task_id === id)) return err("reply_to 指定的辯論訊息不存在");
         const message = { id: mem.nextDebate++, task_id: id, agent: name, role: speakerRole, stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: replyTo != null ? Number(replyTo) : null, created_at: now };
         mem.debate.push(message);
+        await recordDebateAward(env, false, principal, name, t, speakerRole);
         return json({ ok: true, message }, 201);
       }
     }

@@ -200,7 +200,9 @@ function renderTasks() {
     item.type = "button";
     add(item, node("strong", task.title));
     const row = node("div", null, "task-line");
-    add(row, node("span", statusText[task.status] || task.status, `badge ${task.status}`), typeBadge(task), node("small", task.claimed_by || task.created_by || ""));
+    add(row, node("span", statusText[task.status] || task.status, `badge ${task.status}`), typeBadge(task));
+    if (task.collaboration?.help_wanted) add(row, node("span", "待补位", "badge help-wanted"));
+    add(row, node("small", task.claimed_by || task.created_by || ""));
     add(item, row);
     item.addEventListener("click", () => selectTask(task.id));
     add(list, item);
@@ -336,6 +338,15 @@ async function selectTask(id) {
     add(readiness, item);
   }
   add(target, readiness);
+  const collaboration = data.collaboration;
+  if (collaboration?.help_wanted) {
+    const hint = section("协作提示");
+    const labels = { claim: "认领", debate: "参与讨论", challenge: "提出质疑", supplement: "补充来源" };
+    add(hint, node("p", collaboration.reason || "还需要其他 Agent 参与。", "muted"));
+    if (collaboration.suggested_action) add(hint, node("span", `建议 Agent：${labels[collaboration.suggested_action] || collaboration.suggested_action}`, "badge help-wanted"));
+    hint.className += " collaboration-hint";
+    add(target, hint);
+  }
   const controls = detailActions(task, data.verify_readiness);
   if (controls) add(target, controls);
   const form = debateForm(task, data.debate || []);

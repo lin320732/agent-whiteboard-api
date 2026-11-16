@@ -66,6 +66,7 @@ test("auth DDL is compatible with D1 exec's line-oriented parser", async () => {
 test("remote migration is additive and can be applied twice", async () => {
   const { DB } = setup();
   DB.sqlite.exec("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT)");
+  DB.sqlite.exec("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, agent TEXT, type TEXT, task_id INTEGER, points INTEGER, created_at TEXT)");
   DB.sqlite.exec("INSERT INTO tasks (id, title) VALUES (42, 'kept')");
   const migration = readFileSync(new URL("../migrations/0001-auth.sql", import.meta.url), "utf8");
   DB.sqlite.exec(migration);
@@ -73,6 +74,9 @@ test("remote migration is additive and can be applied twice", async () => {
   const labels = readFileSync(new URL("../migrations/0002-display-names.sql", import.meta.url), "utf8");
   DB.sqlite.exec(labels);
   DB.sqlite.exec(labels);
+  const award = readFileSync(new URL("../migrations/0003-debate-award.sql", import.meta.url), "utf8");
+  DB.sqlite.exec(award);
+  DB.sqlite.exec(award);
   assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM principal_labels").get().n, 0);
   assert.equal(DB.sqlite.prepare("SELECT title FROM tasks WHERE id=42").get().title, "kept");
   assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM sessions").get().n, 0);
@@ -156,6 +160,8 @@ test("display-name edits preserve identity, claims, scores and issued credential
   const before = await request("GET", "/api/tasks/1", undefined, agent);
   assert.equal(before.data.task.claimed_by, "New Muse");
   assert.match(before.data.verify_readiness.checks[0].detail, /New Muse/);
+  assert.match(before.data.collaboration.missing.find(c => c.key === "agents").detail, /New Muse/);
+  assert.match(before.data.collaboration.reason, /New Muse/);
   assert.equal((await request("GET", "/api/tasks", undefined, agent)).data.tasks.find(t => t.id === 1).claimed_by, "New Muse");
   assert.equal((await request("GET", "/api/messages?channelId=1", undefined, agent)).data.messages[0].author, "New Muse");
   assert.equal((await request("GET", "/api/tasks/1/debate", undefined, agent)).data.debate[0].agent, "New Muse");
@@ -200,6 +206,59 @@ test("display-name edits require admin session, validate inputs and avoid ambigu
   assert.equal((await request("POST", `/api/admin/agents/${second.data.id}/revoke`, {}, admin)).status, 200);
   assert.equal((await request("POST", `/api/admin/agents/${second.data.id}/name`, { name: "已停用的新标签" }, admin)).status, 200);
   assert.equal((await request("GET", "/api/admin/agents", undefined, admin)).data.accounts.find(x => x.id === second.data.id).name, "已停用的新标签");
+});
+
+test("agent collaboration queue surfaces claimed work and rewards one debate reply", async () => {
+  const { request, DB } = setup();
+  const { cookie } = await owner(request);
+  const admin = { Cookie: cookie, ...boardOrigin };
+  const first = await request("POST", "/api/admin/agents", { username: "agent-a", name: "Agent A" }, admin);
+  const second = await request("POST", "/api/admin/agents", { username: "agent-b", name: "Agent B" }, admin);
+  const a = { Authorization: `Bearer ${first.data.token}` };
+  const b = { Authorization: `Bearer ${second.data.token}` };
+  const queue = async () => (await request("GET", "/api/tasks?needs=agent", undefined, b)).data.tasks;
+
+  const open = (await queue()).find(t => t.id === 1);
+  assert.equal(open.collaboration.help_wanted, true);
+  assert.equal(open.collaboration.suggested_action, "claim");
+  assert.equal((await request("POST", "/api/tasks/1/claim", { role: "researcher" }, a)).status, 200);
+
+  let task = (await queue()).find(t => t.id === 1);
+  assert.equal(task.collaboration.help_wanted, true);
+  assert.equal(task.collaboration.suggested_action, "debate");
+  assert.equal(task.collaboration.participants, 1);
+  assert.ok(task.collaboration.missing.some(c => c.key === "agents"));
+  assert.equal((await request("POST", "/api/tasks/1/result", { summary: "初稿", links: ["https://example.com/a"] }, a)).status, 200);
+
+  task = (await queue()).find(t => t.id === 1);
+  assert.equal(task.collaboration.suggested_action, "challenge");
+  assert.ok(task.collaboration.missing.some(c => c.key === "challenge"));
+  assert.ok(task.collaboration.missing.some(c => c.key === "links"));
+  assert.equal((await request("POST", "/api/tasks/1/challenge", { reason: "需要第二来源", evidence: "https://example.com/c" }, b)).status, 200);
+
+  task = (await queue()).find(t => t.id === 1);
+  assert.equal(task.collaboration.suggested_action, "supplement");
+  assert.deepEqual(task.collaboration.missing.map(c => c.key), ["links"]);
+  assert.equal((await request("POST", "/api/tasks/1/supplement", { summary: "补两个来源", links: ["https://example.com/b", "https://example.com/c"] }, b)).status, 200);
+  assert.equal((await queue()).some(t => t.id === 1), false);
+  const detail = await request("GET", "/api/tasks/1", undefined, b);
+  assert.equal(detail.data.collaboration.help_wanted, false);
+  assert.equal(detail.data.verify_readiness.ready, true);
+
+  assert.equal((await request("POST", "/api/tasks/2/claim", { role: "researcher" }, a)).status, 200);
+  assert.equal((await request("POST", "/api/tasks/2/debate", { stance: "支持", content: "补充一个观点" }, b)).status, 201);
+  assert.equal((await request("POST", "/api/tasks/2/debate", { stance: "補充", content: "再说一次" }, b)).status, 201);
+  assert.equal((await request("POST", "/api/tasks/2/debate", { stance: "支持", content: "认领者发言" }, a)).status, 201);
+  assert.equal((await request("POST", "/api/tasks/2/debate", { stance: "支持", content: "真人发言" }, admin)).status, 201);
+
+  const ranking = await request("GET", "/api/leaderboard", undefined, b);
+  const secondRow = ranking.data.leaderboard.find(x => x.agent === "Agent B");
+  const firstRow = ranking.data.leaderboard.find(x => x.agent === "Agent A");
+  assert.equal(secondRow.points, 23);
+  assert.equal(secondRow.counts.debate, 1);
+  assert.equal(firstRow.points, 20);
+  assert.equal(firstRow.counts.debate, 0);
+  assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM events WHERE type='debate'").get().n, 1);
 });
 
 test("dashboard and Agent debate stances accept simplified Chinese and documented aliases", async () => {
