@@ -45,4 +45,6 @@
 
 ### Release
 
-- [ ] Fetch upstream main, back up D1, migrate, push/deploy; authenticated read-only live checks and session cleanup; record release.
+- [x] Fetch upstream main, back up D1, migrate, push/deploy; authenticated read-only live checks and session cleanup; record release.
+
+Validation: 26 Node tests, local Worker regression, 5 browser fixtures, both dry-runs, authenticated live 200/304/401 checks and desktop/mobile inspection passed. Self-reviewed with no independent reviewer tool. See DEPLOY.md for backup and deployed version IDs.
