@@ -1,9 +1,9 @@
-import { initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
-import { initCollaboration } from "./collaboration-schema.js";
+import { AUTH_SCHEMA, initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
+import { COLLABORATION_SCHEMA, initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
-import { initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
-import { initTaskPlans, newPlan, planInsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
+import { GUIDE_SCHEMA, initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
+import { TASK_PLAN_SCHEMA, initTaskPlans, newPlan, planInsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -420,20 +420,7 @@ async function tryAlter(env, sql) {
   }
 }
 
-const initByDb = new WeakMap();
-async function dbInit(env) {
-  if (!env.DB) return false;
-  let pending = initByDb.get(env.DB);
-  if (!pending) {
-    pending = initializeDatabase(env).catch(error => { initByDb.delete(env.DB); throw error; });
-    initByDb.set(env.DB, pending);
-  }
-  await pending;
-  return true;
-}
-
-async function initializeDatabase(env) {
-  await env.DB.exec(`CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, topic TEXT DEFAULT '', created_at TEXT);
+const CORE_SCHEMA = `CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, topic TEXT DEFAULT '', created_at TEXT);
   CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, title TEXT NOT NULL, detail TEXT DEFAULT '', deadline TEXT DEFAULT '', created_by TEXT DEFAULT '', status TEXT DEFAULT 'open', type TEXT DEFAULT 'research', claimed_by TEXT, claimed_role TEXT, proposed_by TEXT DEFAULT '', result_summary TEXT DEFAULT '', result_links TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
   CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER, author TEXT NOT NULL, role TEXT DEFAULT 'agent', text TEXT NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, evidence TEXT DEFAULT '', created_at TEXT);
@@ -441,7 +428,35 @@ async function initializeDatabase(env) {
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);
-  CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';`);
+  CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';`;
+// Derive the probe from the same DDL as migrations, so new tables cannot be skipped.
+const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA].join('\n')
+  .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)]
+  .map(match => ({ type: match[1].toLowerCase(), name: match[2] }));
+const initializedDbs = new WeakSet();
+async function schemaReady(db) {
+  if (typeof db.prepare !== 'function') return false;
+  const names = schemaObjects.map(object => object.name);
+  const { results } = await db.prepare(`SELECT name,type FROM sqlite_master WHERE name IN (${names.map(() => '?').join(',')})`).bind(...names).all();
+  if (!schemaObjects.every(expected => results.some(row => row.name === expected.name && row.type === expected.type))) return false;
+  const [columns, channels] = await readBatch(db, [
+    ['PRAGMA table_info(tasks)'],
+    ['SELECT id FROM channels LIMIT 1'],
+  ]);
+  return ['claimed_role', 'proposed_by', 'type'].every(name => columns.some(column => column.name === name)) && channels.length > 0;
+}
+async function dbInit(env) {
+  if (!env.DB) return false;
+  if (initializedDbs.has(env.DB)) return true;
+  // A migrated database needs only reads on a cold invocation, not schema writes.
+  // Cache completed readiness only; do not share request-owned I/O promises.
+  if (!await schemaReady(env.DB)) await initializeDatabase(env);
+  initializedDbs.add(env.DB);
+  return true;
+}
+
+async function initializeDatabase(env) {
+  await env.DB.exec(CORE_SCHEMA);
   // 已有庫（v0.1 建的 tasks 表）補欄位；新庫建表時已有，不會重複
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN claimed_role TEXT");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
@@ -453,14 +468,14 @@ async function initializeDatabase(env) {
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
-    await env.DB.prepare("INSERT INTO channels (id, name, topic, created_at) VALUES (1, ?, ?, ?)").bind("黃仁勳新聞追蹤", "追蹤 Nvidia 11月17日 Q3 財報、HSBC 評級下調及 Kress 11月18日全員大會", now).run();
+    await env.DB.prepare("INSERT OR IGNORE INTO channels (id, name, topic, created_at) VALUES (1, ?, ?, ?)").bind("黃仁勳新聞追蹤", "追蹤 Nvidia 11月17日 Q3 財報、HSBC 評級下調及 Kress 11月18日全員大會", now).run();
     const seed = [
       [1, "查 11月17日財報幾點公布、在哪看直播", "Nvidia Q3 財報原定 2026-11-17 公布，確認美東/澳門時間幾點、在官網哪裡看直播或新聞稿連結。", "2026-11-17", "LV"],
       [2, "整理 Kress 11月18日全員大會可能講什麼", "臨時 CEO Colette Kress 定於美西時間 11月18日早上 9 點開全員大會，整理可能講的議題：財報、接班人搜尋、公司方向。", "2026-11-18", "LV"],
       [3, "找 HSBC 下調評級到 $170 的原文和理由", "HSBC 在 2026-11-13 把 Nvidia 評級下調至持有，目標價由 $375 降至 $170，當日收 $162.85 跌 2.01%。找原文出處和下調理由。", "2026-11-17", "LV"],
     ];
     for (const [id, title, detail, deadline, by] of seed) {
-      await env.DB.prepare("INSERT INTO tasks (id, channel_id, title, detail, deadline, created_by, status, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, 'open', ?, ?)").bind(id, title, detail, deadline, by, now, now).run();
+      await env.DB.prepare("INSERT OR IGNORE INTO tasks (id, channel_id, title, detail, deadline, created_by, status, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, 'open', ?, ?)").bind(id, title, detail, deadline, by, now, now).run();
     }
   }
   return true;

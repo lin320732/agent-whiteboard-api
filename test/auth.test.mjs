@@ -69,6 +69,61 @@ test("auth DDL is compatible with D1 exec's line-oriented parser", async () => {
   assert.equal(DB.sqlite.prepare("SELECT count(*) AS n FROM principals").get().n, 0);
 });
 
+test('cold login on a migrated database never requires schema writes', async () => {
+  const {env,DB,request}=setup();
+  const {password}=await owner(request);
+  let schemaWrites=0;
+  env.DB={...DB,exec(){schemaWrites++;throw Error('Schema writes are unavailable');}};
+  const login=await request('POST','/api/auth/login',{username:'owner',password});
+  assert.equal(login.status,200);
+  assert.equal(schemaWrites,0);
+  assert.match(login.cookie,/HttpOnly; Secure/);
+});
+
+test('concurrent cold logins probe readiness independently without sharing request I/O', async () => {
+  const {env,DB,request}=setup();
+  const {password}=await owner(request);
+  let probes=0;
+  env.DB={...DB,exec(){throw Error('Cold login must not migrate');},prepare(sql){if(sql.includes('sqlite_master')) probes++;return DB.prepare(sql);}};
+  const logins=await Promise.all([1,2,3].map(()=>request('POST','/api/auth/login',{username:'owner',password})));
+  assert.deepEqual(logins.map(login=>login.status),[200,200,200]);
+  assert.equal(probes,3);
+});
+
+test('failed cold readiness reads fail closed and can recover on the next request', async () => {
+  const {env,DB,request}=setup();
+  await owner(request);
+  let probes=0;
+  env.DB={...DB,exec(){throw Error('Migrated schema must not be rewritten');},prepare(sql){if(sql.includes('sqlite_master')&&++probes===1) throw Error('Temporary D1 read failure');return DB.prepare(sql);}};
+  assert.equal((await request('GET','/api/health')).status,503);
+  assert.equal((await request('GET','/api/health')).status,200);
+  const completedProbes=probes;
+  assert.equal((await request('GET','/api/health')).status,200);
+  assert.equal(probes,completedProbes);
+});
+
+test('cold readiness still repairs missing schema objects without replacing task records', async () => {
+  const {env,DB,request}=setup();
+  await owner(request);
+  const tasks=DB.sqlite.prepare('SELECT * FROM tasks ORDER BY id').all();
+  DB.sqlite.exec('DROP TABLE work_deliveries; DROP INDEX events_debate_once;');
+  let schemaWrites=0;
+  env.DB={...DB,exec(sql){schemaWrites++;return DB.exec(sql);}};
+  assert.equal((await request('GET','/api/health')).status,200);
+  assert.ok(schemaWrites>0);
+  assert.ok(DB.sqlite.prepare("SELECT name FROM sqlite_master WHERE name='work_deliveries'").get());
+  assert.ok(DB.sqlite.prepare("SELECT name FROM sqlite_master WHERE name='events_debate_once'").get());
+  assert.deepEqual(DB.sqlite.prepare('SELECT * FROM tasks ORDER BY id').all(),tasks);
+});
+
+test('concurrent first-ever invocations seed a new database once', async () => {
+  const {DB,request}=setup();
+  const responses=await Promise.all([1,2,3].map(()=>request('GET','/api/health')));
+  assert.deepEqual(responses.map(response=>response.status),[200,200,200]);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM channels').get().n,1);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM tasks').get().n,3);
+});
+
 test("remote migration is additive and can be applied twice", async () => {
   const { DB } = setup();
   DB.sqlite.exec("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT)");
