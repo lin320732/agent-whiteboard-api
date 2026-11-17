@@ -81,11 +81,12 @@ export async function decorateCollaboration(db, task, context, readiness, collab
   if(work.enabled) {
     const current=work.outcomes[0];
     const summary=current?.summary||task.result_summary||'';
+    const missingReport=work.plan.delivery.format==='web_report'&&!current?.report;
     const sourceLinks=current?(work.plan.configured?current.links:current.links||task.result_links):task.result_links;
     const urls=new Set((sourceLinks||'').match(/https?:\/\/[^\s]+/g)||[]);
     if(current?.report) urls.delete(current.report.url);
     const policy=work.plan.acceptance;
-    const checks=[check('result','交付物已提交',!!summary.trim(),summary.trim()?'已有成果内容':'等待主持人整理成果'),
+    const checks=[check('result','交付物已提交',!!summary.trim()&&!missingReport,missingReport?'等待主要作者发布并登记网页报告；文字材料不算报告交付':summary.trim()?'已有成果内容':'等待主持人整理成果'),
       check('waiting','等待事项已恢复',!work.waiting,work.waiting?`等待 ${work.wait_reason} 至 ${work.resume_at}`:'当前无需等待外部事件'),
       check('issues','重要问题已解决',!work.blocking,work.blocking?`还有 ${work.blocking} 项重要问题待处理`:'没有未解决的重要问题'),
       check('subtasks','分工已完成',!work.subtasks.some(s=>!['done','declined'].includes(s.state)),'未完成的分工须交付或明确退出')];
@@ -117,6 +118,7 @@ async function inbox(db,p) {
   const items=[], waiting=[];
   for(const t of tasks) {
     const w=await workflowContext(db,t);
+    const missingReport=w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report;
     const base={task_id:t.id,title:t.title};
     if(w.waiting&&!w.blocking) {
       if(admin(p)||w.host_id===p.id||w.report_author_id===p.id||t.claimed_by===p.name||(!w.host_id&&agent(p))) waiting.push({...base,kind:'schedule',resume_at:w.resume_at,reason:w.wait_reason});
@@ -133,10 +135,10 @@ async function inbox(db,p) {
       if(w.host_id===p.id||i.author_id===p.id||admin(p)||((responsible||t.claimed_by===p.name)&&i.state==='open')) items.push({...base,kind:'issue',issue_id:i.id,reason:i.text,state:i.state});
     }
     if(agent(p)&&w.report_author_id===p.id) {
-      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',reason:'制作报告并登记发布链接与版本'});
+      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',reason:`先制作并发布网页报告，再通过 POST /api/tasks/${t.id}/outcomes 提交 report.url、report.revision 与当前 workflow.fingerprint`});
       else if(!w.issues.some(i=>i.state==='open')) waiting.push({...base,kind:'report_review',resume_at:null,reason:w.blocking?'报告问题已回应，等待他人确认':w.plan.acceptance.independent_review&&!w.current_reviews.length?'报告已登记，等待独立核查':'报告已交付，等待用户确认'});
     }
-    if(agent(p)&&w.enabled&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示':'请独立核查当前成果'});
+    if(agent(p)&&w.enabled&&!missingReport&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示':'请独立核查当前成果'});
     if(agent(p)) for(const s of w.subtasks.filter(s=>s.state==='submitted'&&s.assignee_id!==p.id)) items.push({...base,kind:'subtask_review',subtask_id:s.id,title:s.title});
   }
   return {items,waiting,poll_after_seconds:900,agent_guide:GUIDE_DISCOVERY};
@@ -221,6 +223,7 @@ export async function collaborationRoute(request, env, principal, path) {
     if(kind==='reviews') {
       if(!w.enabled||!agent(p)||w.author_ids.includes(p.id)) fail('核查须由当前成果作者以外的 Agent 执行',403);
       if(b.fingerprint!==w.fingerprint) fail('成果已更新，请重新读取并核查',409);
+      if(w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report) fail('尚未登记网页报告，请等待主要作者发布并通过 /outcomes 提交报告链接与版本后再核查',409);
       if(!w.outcomes.length&&!String(task.result_summary||'').trim()) fail('尚无成果可核查',409);
       const note=text(b.note,4000),evidence=links(b.evidence),report=w.outcomes[0]?.report;
       if(report&&(b.report_revision!==report.revision||!evidence.split('\n').includes(report.url))) fail('请实际打开当前网页报告，附报告链接及对应 report_revision 后核查');

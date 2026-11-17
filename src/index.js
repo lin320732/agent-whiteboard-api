@@ -822,6 +822,7 @@ const businessWorker = {
         if (['claim','result','supplement'].includes(action)) {
           const plan=await readPlan(env.DB,cur),scheduled=scheduleState(plan);
           if(!scheduled.ready) return err(scheduled.reason,409);
+          if(action==='result'&&plan.delivery.format==='web_report') return err(`此任务要求已发布的网页报告；请先在 MUSE 等平台发布，再通过 POST /api/tasks/${id}/outcomes 提交 report.url、report.revision 与最新 workflow.fingerprint，不能用纯文字代替报告。`);
         }
 
         if (action === "claim") {

@@ -100,6 +100,55 @@ test('MUSE reports support a dedicated author, independent findings, revision an
   assert.equal(list.report.revision,'v2');assert.equal(list.goal,'analysis');
 });
 
+test('web report tasks reject legacy result submissions without changing content, status or awards',async()=>{
+  const f=await fixture(),id=await create(f,{delivery:{format:'web_report',author_id:f.worker.id}});
+  assert.equal((await f.request('POST',`/api/tasks/${id}/claim`,{},f.worker.auth)).status,200);
+  const before=f.DB.sqlite.prepare('SELECT * FROM tasks WHERE id=?').get(id);
+  for(const body of [
+    {summary:'只有文字',links:[source]},
+    {result_summary:'旧客户端文字',result_links:source},
+    {summary:'带报告字段也须使用正确接口',report:{url:reportUrl,revision:'v1'}},
+  ]) {
+    const response=await f.request('POST',`/api/tasks/${id}/result`,body,f.worker.auth);
+    assert.equal(response.status,400);
+    assert.ok(response.data.error.includes(`/api/tasks/${id}/outcomes`));
+    assert.ok(response.data.error.includes('report.url')&&response.data.error.includes('report.revision'));
+    assert.deepEqual(f.DB.sqlite.prepare('SELECT * FROM tasks WHERE id=?').get(id),before);
+    assert.equal(f.DB.sqlite.prepare("SELECT COUNT(*) AS n FROM events WHERE task_id=? AND type='result'").get(id).n,0);
+  }
+  assert.equal((await publish(f,id,'v1')).status,201);
+  assert.equal((await review(f,id)).status,201);
+  assert.equal((await f.request('POST',`/api/tasks/${id}/verify`,{},f.admin)).status,200);
+});
+
+test('existing text cannot fulfill or enter independent review after a task requires a web report',async()=>{
+  const f=await fixture(),id=await create(f);
+  await f.request('POST',`/api/tasks/${id}/claim`,{},f.worker.auth);
+  assert.equal((await f.request('POST',`/api/tasks/${id}/result`,{summary:'保留的文字材料',links:[source]},f.worker.auth)).status,200);
+  let d=await detail(f,id);
+  assert.equal(d.verify_readiness.checks.find(c=>c.key==='result').met,true);
+  await f.request('POST',`/api/tasks/${id}/plan`,{revision:d.plan.revision,delivery:{format:'web_report',author_id:f.worker.id}},f.admin);
+  d=await detail(f,id);
+  assert.equal(d.task.result_summary,'保留的文字材料');
+  assert.equal(d.verify_readiness.checks.find(c=>c.key==='result').met,false);
+  assert.equal(d.verify_readiness.checks.find(c=>c.key==='report').met,false);
+  const checkerInbox=(await f.request('GET','/api/inbox',undefined,f.checker.auth)).data;
+  assert.equal(checkerInbox.items.some(i=>i.task_id===id&&i.kind==='review'),false);
+  const authorInbox=(await f.request('GET','/api/inbox',undefined,f.worker.auth)).data;
+  assert.ok(authorInbox.items.some(i=>i.task_id===id&&i.kind==='report'&&i.reason.includes('/outcomes')));
+  const response=await review(f,id);
+  assert.equal(response.status,409);
+  assert.ok(response.data.error.includes('网页报告'));
+  assert.equal(f.DB.sqlite.prepare('SELECT COUNT(*) AS n FROM work_reviews WHERE task_id=?').get(id).n,0);
+  assert.equal((await f.request('POST',`/api/tasks/${id}/verify`,{},f.admin)).status,400);
+  assert.equal((await publish(f,id,'v1')).status,201);
+  const publishedInbox=(await f.request('GET','/api/inbox',undefined,f.checker.auth)).data;
+  assert.ok(publishedInbox.items.some(i=>i.task_id===id&&i.kind==='review'&&i.report?.url===reportUrl));
+  assert.equal((await review(f,id)).status,201);
+  assert.equal((await f.request('POST',`/api/tasks/${id}/verify`,{},f.admin)).status,200);
+  assert.equal((await detail(f,id)).task.result_summary,'保留的文字材料');
+});
+
 test('a report link does not count as its factual source, and simultaneous versions have one winner',async()=>{
   const f=await fixture(),id=await create(f,{goal:'research',delivery:{format:'web_report',author_id:f.worker.id}});
   assert.equal((await publish(f,id,'v1',f.worker.auth,{links:[reportUrl]})).status,201);
