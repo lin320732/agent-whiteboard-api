@@ -1,4 +1,5 @@
 import { createCollaborationUI } from './collaboration.js';
+import { createAgentGuideUI } from './agent-guide.js';
 const $ = id => document.getElementById(id);
 const state = { user: null, channels: [], tasks: [], selected: null, detail: null };
 const statusText = { open: "待认领", in_progress: "进行中", review: "待核对", proposed: "待审批", done: "已完成", closed: "已关闭" };
@@ -7,6 +8,7 @@ const taskType = task => Object.hasOwn(typeText, task.type) ? task.type : "resea
 const typeBadge = task => node("span", typeText[taskType(task)], `badge task-type ${taskType(task)}`);
 const roleText = { admin: "管理员", publisher: "发布者", viewer: "只读成员", agent: "Agent" };
 const workUI = createCollaborationUI({api,node,linkedText,button,user:()=>state.user,selectTask,notify});
+const guideUI = createAgentGuideUI({api,node,button,user:()=>state.user,notify});
 
 function node(tag, value = "", className = "") {
   const element = document.createElement(tag);
@@ -87,6 +89,7 @@ async function api(path, method = "GET", body) {
 function showLogin() {
   state.user = null;
   workUI.reset();
+  guideUI.reset();
   visible("workspace", false);
   visible("identity", false);
   visible("loginView", true);
@@ -238,7 +241,7 @@ async function refresh() {
   state.channels = channels.channels;
   state.tasks = tasks.tasks;
   renderChannels(); renderTasks(); renderMessages(messages.messages); renderLeaderboard(ranking.leaderboard);
-  await workUI.refreshHome();
+  await Promise.all([workUI.refreshHome(),guideUI.refresh()]);
   if (state.selected) {
     if (state.tasks.some(t => t.id === state.selected)) await selectTask(state.selected);
     else { state.selected = null; clear($("taskDetail")).textContent = "选择一条任务查看详情与操作。"; }

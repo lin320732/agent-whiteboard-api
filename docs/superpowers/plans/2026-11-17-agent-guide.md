@@ -30,16 +30,19 @@
 **Files:** Create `src/agent-guide.js`, `src/agent-guide-content.js` (generated), `scripts/build-agent-guide.mjs`, `migrations/0005-agent-guide.sql`, `test/agent-guide.test.mjs`; modify `src/index.js`, `src/collaboration.js`, `docs/AGENT_LOOP.md`, `wrangler.toml`.
 **Interfaces:** `initAgentGuide(db)` initializes additive schema; `agentGuideRoute(request,env,principal,path)` returns Response or null; `GUIDE_DISCOVERY` is a static path/check policy, never private text. GET `/api/agent-guide` returns `{version,markdown,instructions,updated_at,bootstrap,entrypoints}` with ETag. POST `/api/admin/agent-guide` accepts `{version,instructions}`.
 
-- [ ] Write tests for personal auth, admin-only updates, wrong origin, revision conflict, clear/max length, ETag invalidation and doc parity; watch them fail.
-- [ ] Implement generated content, schema, versioned reads, atomic append and discovery in health/tasks/inbox.
-- [ ] Run Node suites and local Worker regression; commit.
+- [x] Write tests for personal auth, admin-only updates, wrong origin, revision conflict, clear/max length, ETag invalidation and doc parity; watch them fail.
+- [x] Implement generated content, schema, versioned reads, atomic append and discovery in health/tasks/inbox.
+- [x] Run Node suites and local Worker regression; commit.
 
 ### Task 2: Console guide management and release
 
 **Files:** Create `web/agent-guide.js`, `test/agent-guide.playwright.js`; modify `web/app.js`, `web/index.html`, `web/style.css`, `README.md`, `DEPLOY.md`.
 **Interfaces:** `createAgentGuideUI({api,node,button,user,notify})` exposes `refresh()` and `reset()`; UI reads endpoint from Task 1 and submits its current version. Refresh preserves unsaved editor text.
 
-- [ ] Add browser checks for publish, failed-save drafts, content safety and viewer restrictions; observe failure.
-- [ ] Implement read-only guide view, admin editor and one-time bootstrap copy affordance.
-- [ ] Run browser fixtures, Node tests, both dry-runs; self-review and commit.
+- [x] Add browser checks for publish, failed-save drafts, content safety and viewer restrictions; observe failure.
+- [x] Implement read-only guide view, admin editor and one-time bootstrap copy affordance.
+- [x] Run browser fixtures, Node tests, both dry-runs; self-review and commit.
+
+### Release
+
 - [ ] Fetch upstream main, back up D1, migrate, push/deploy; authenticated read-only live checks and session cleanup; record release.
