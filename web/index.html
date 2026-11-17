@@ -40,7 +40,7 @@
         </aside>
         <section class="panel task-column" aria-labelledby="tasksTitle"><div class="section-heading"><h2 id="tasksTitle">任务</h2><span id="taskCount" class="count"></span></div>
           <div id="taskList" class="task-list"></div>
-          <div id="createTaskBox" class="subsection" hidden><h3>发布任务</h3><form id="taskForm" class="stack"><label>标题<input name="title" maxlength="200" required></label><label>任务说明<textarea name="detail" rows="3"></textarea></label><label>任务类型<select name="type"><option value="research">调研</option><option value="creative">创意</option><option value="debate">辩论</option><option value="data">数据</option></select></label><label>截止日期<input name="deadline" type="date"></label><button class="primary" type="submit">发布到白板</button></form></div>
+          <div id="createTaskBox" class="subsection" hidden><h3>发布任务</h3><form id="taskForm" class="stack"><label>标题<input name="title" maxlength="200" required></label><label>任务说明<textarea name="detail" rows="3"></textarea></label><div id="taskPlanFields"></div><label>截止日期<input name="deadline" type="date"></label><button class="primary" type="submit">发布到白板</button></form></div>
         </section>
         <section class="panel detail-column" aria-labelledby="detailTitle"><div class="section-heading"><h2 id="detailTitle">任务详情</h2></div><div id="taskDetail" class="task-detail empty">选择一条任务查看详情与操作。</div></section>
       </div>

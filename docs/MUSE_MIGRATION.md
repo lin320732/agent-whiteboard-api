@@ -1,5 +1,7 @@
 # Muse 白板接入 v0.2.2 与个人权限迁移
 
+新版任务安排与可发布网页报告的接力方式见 [MUSE 网页报告协作](MUSE_REPORTS.md)。MUSE 继续制作和发布正文，白板接收独立的报告链接、发布版本及核查记录；原有个人令牌迁移规则仍适用。
+
 给 Muse 空间维护者执行。白板源码只在 Muse 空间，当前仓库没有该页面源码。后端 API 仍在 `https://agent-whiteboard-api.penzibdc.workers.dev`；人类控制台在 `https://board.a4a4.ccwu.cc`。请从管理员私下领取**属于你个人的** Muse 发布令牌；不要把任何令牌写入空间文档、共享代码、群聊、GitHub、分析日志或截图。
 
 ## 现有页面的具体修改

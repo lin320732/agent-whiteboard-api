@@ -124,11 +124,12 @@ test('hosted policy accepts independent verification, rejects self review and in
   assert.equal((await request('POST','/api/tasks/1/verify',{},admin)).status,200);
 });
 
-test('hosted creative quality and debate opposing views retain their distinct readiness rules',async()=>{
+test('hosted content and opposing views use independently configured acceptance rules',async()=>{
   for(const type of ['creative','debate']) {
     const f=await fixture(),{request,DB,admin,host,worker,checker}=f;
-    await hosted(f);DB.sqlite.prepare('UPDATE tasks SET type=? WHERE id=1').run(type);
-    await request('POST','/api/tasks/1/workflow',{host_id:host.id,acceptance:'按任务类型验收',min_sources:0},admin);
+    await hosted(f);
+    const initial=(await request('GET','/api/tasks/1',undefined,admin)).data.plan;
+    assert.equal((await request('POST','/api/tasks/1/plan',{revision:initial.revision,goal:type==='creative'?'content':'analysis',acceptance:{criteria:'按约定验收',min_sources:0,independent_review:type!=='creative',opposing_views:type==='debate'}},admin)).status,200);
     let d=(await request('GET','/api/tasks/1',undefined,checker.auth)).data;
     if(type==='creative') {assert.equal(d.verify_readiness.ready,true);continue;}
     await request('POST','/api/tasks/1/reviews',{fingerprint:d.workflow.fingerprint,note:'已核对论据',evidence:['https://example.com']},checker.auth);

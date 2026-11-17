@@ -1,4 +1,5 @@
 import { originAllowed, permit } from './auth.js';
+import { newPlan, planInsert, validatePlanAgents, legacyType } from './task-plan.js';
 import { WorkError,fail,answer,all,first,run,now,text,id,links,admin,agent,hostAllowed,requireTask,writable,workflowContext,sourceRef,audit } from './collaboration.js';
 
 const THEMES=[{id:'tech',name:'科技与市场'},{id:'tools',name:'工具与优惠'},{id:'food',name:'美食与生活'}];
@@ -57,11 +58,14 @@ export async function communityRoute(request,env,p,path) {
         if(await first(db,'SELECT task_id FROM community_proposals WHERE topic_id=? AND author_id=?',topicId,p.id)) fail('你已从这个话题提交提案',409);
         const title=text(b.title,200),detail=text(b.detail,4000),expected=text(b.expected,2000),value=text(b.value,2000),type=b.type||'research';
         if(!['research','data','creative','debate'].includes(type)) fail('无效任务类型');
+        const plan=newPlan(b.plan||{},type);
+        await validatePlanAgents(db,plan);
         const stamp=now();
         let result;
         try {
           result=await db.batch([
-            db.prepare(`INSERT INTO tasks(title,detail,created_by,proposed_by,status,type,created_at,updated_at) VALUES(?,?,?,?,'proposed',?,?,?)`).bind(title,`${detail}\n\n预期交付：${expected}\n价值：${value}\n来源话题 #${topicId}：${topic.title}`,p.name,p.name,type,stamp,stamp),
+            db.prepare(`INSERT INTO tasks(title,detail,created_by,proposed_by,status,type,created_at,updated_at) VALUES(?,?,?,?,'proposed',?,?,?)`).bind(title,`${detail}\n\n预期交付：${expected}\n价值：${value}\n来源话题 #${topicId}：${topic.title}`,p.name,p.name,b.type?type:legacyType(plan.goal),stamp,stamp),
+            planInsert(db,null,plan),
             db.prepare('INSERT INTO community_proposals(topic_id,task_id,author_id) VALUES(?,last_insert_rowid(),?)').bind(topicId,p.id),
           ]);
         } catch(e) {if(String(e.message).includes('UNIQUE constraint')) fail('你已从这个话题提交提案',409);throw e;}

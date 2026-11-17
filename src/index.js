@@ -3,6 +3,7 @@ import { initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
 import { initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
+import { initTaskPlans, newPlan, planInsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -447,6 +448,7 @@ async function initializeDatabase(env) {
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
   await initCollaboration(env.DB);
+  await initTaskPlans(env.DB);
   await initAgentGuide(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
@@ -570,6 +572,8 @@ const ENDPOINTS = [
   "POST /api/tasks/:id/approve", "POST /api/tasks/:id/reject",
   "GET /api/leaderboard",
   "GET /api/link-preview?url=https://...",
+  "GET /api/tasks/:id/plan", "POST /api/tasks/:id/plan", "POST /api/tasks/:id/trigger",
+  "POST /api/tasks/:id/outcomes", "POST /api/tasks/:id/reviews", "POST /api/tasks/:id/issues",
   "GET /api/messages?channelId=1", "POST /api/messages",
 ];
 
@@ -661,6 +665,9 @@ const businessWorker = {
             t.verify_readiness = enriched.readiness;
             t.collaboration = enriched.collaboration;
             t.host = enriched.workflow.host;
+            t.plan = enriched.workflow.plan;
+            t.goal = t.plan.goal;
+            t.report = enriched.workflow.outcomes[0]?.report || null;
           }));
         }
         const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
@@ -692,8 +699,13 @@ const businessWorker = {
       const createdBy = isTest ? (b.createdBy || proposedBy) : actorName(principal, b);
       const status = isProposed ? "proposed" : "open";
       if (useDb) {
-        const r = await env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, type, now, now).run();
-        return json({ ok: true, id: r.meta.last_row_id, status }, 201);
+        const plan = newPlan(b.plan || {}, type);
+        await validatePlanAgents(env.DB, plan);
+        const results = await env.DB.batch([
+          env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, b.type?type:legacyType(plan.goal), now, now),
+          planInsert(env.DB, null, plan),
+        ]);
+        return json({ ok: true, id: results[0].meta.last_row_id, status, plan:{...plan,revision:1} }, 201);
       }
       const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, type, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: createdBy, proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
       mem.tasks.push(t); return json({ ok: true, id: t.id, status }, 201);
@@ -708,7 +720,8 @@ const businessWorker = {
       const { task, challenges, supplements, debate, eventAgents, forceApprovals } = ctx;
       const readiness = computeReadiness(task, challenges, supplements, eventAgents, debate);
       const enriched = useDb ? await decorateCollaboration(env.DB, task, ctx, readiness, computeCollaboration(task, readiness, ctx)) : { readiness, collaboration: computeCollaboration(task, readiness, ctx) };
-      return json({ ok: true, task, challenges, supplements, debate, verify_readiness: enriched.readiness, collaboration: enriched.collaboration, workflow: enriched.workflow, force_approvals: forceApprovals });
+      if(enriched.workflow) {task.goal=enriched.workflow.plan.goal;task.plan=enriched.workflow.plan;}
+      return json({ ok: true, task, plan:enriched.workflow?.plan, challenges, supplements, debate, verify_readiness: enriched.readiness, collaboration: enriched.collaboration, workflow: enriched.workflow, force_approvals: forceApprovals });
     }
 
     // ---- 質疑 / 補充列表 ----
@@ -791,6 +804,10 @@ const businessWorker = {
       if (useDb) {
         const cur = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
         if (!cur) return err("任務不存在", 404);
+        if (['claim','result','supplement'].includes(action)) {
+          const plan=await readPlan(env.DB,cur),scheduled=scheduleState(plan);
+          if(!scheduled.ready) return err(scheduled.reason,409);
+        }
 
         if (action === "claim") {
           if (cur.status !== "open") return err(`只能認領待認領的任務，現在是 ${cur.status}`);
@@ -819,12 +836,23 @@ const businessWorker = {
             forceReason = String(b.force_reason || "").trim();
             if (!forceReason) return err("強制通過需要填寫一句話理由（force_reason）");
             forced = true;
-            await env.DB.prepare("INSERT INTO force_approvals (task_id, agent, reason, created_at) VALUES (?, ?, ?, ?)").bind(id, principal.kind === "test" ? (b.agent || b.by || "LV") : name, forceReason, now).run();
           }
-          await env.DB.prepare("UPDATE tasks SET status='done', updated_at=? WHERE id=?").bind(now, id).run();
-          await recordEvent(env, true, cur.claimed_by, "verify", id);
+          const acceptStatement=env.DB.prepare(`UPDATE tasks SET status='done', updated_at=? WHERE id=? AND status='review'
+            AND COALESCE((SELECT MAX(id) FROM work_outcomes WHERE task_id=?),0)=?
+            AND COALESCE((SELECT revision FROM task_plans WHERE task_id=?),0)=?
+            AND (SELECT COUNT(*) FROM work_issues WHERE task_id=?)=?
+            AND COALESCE((SELECT SUM(revision) FROM work_issues WHERE task_id=?),0)=?
+            AND COALESCE(result_summary,'')=? AND COALESCE(result_links,'')=?`)
+            .bind(now,id,id,enriched.workflow.outcomes[0]?.id||0,id,enriched.workflow.plan.revision,id,enriched.workflow.issues.length,id,enriched.workflow.issues.reduce((n,i)=>n+i.revision,0),cur.result_summary||'',cur.result_links||'');
+          const statements=[acceptStatement];
+          if(forced) statements.push(env.DB.prepare('INSERT INTO force_approvals(task_id,agent,reason,created_at) SELECT ?,?,?,? WHERE changes()=1').bind(id,name,forceReason,now));
+          statements.push(env.DB.prepare("INSERT INTO events(agent,type,task_id,points,created_at) SELECT ?,'verify',?,?,? WHERE changes()=1 AND ?<>''").bind(cur.claimed_by||'',id,POINTS.verify,now,cur.claimed_by||''));
+          statements.push(...nextOccurrenceStatements(env.DB,cur,enriched.workflow.plan));
+          const results=await env.DB.batch(statements);
+          if(results[0].meta.changes!==1) return err('成果或验收要求已更新，请重读后确认',409);
+          const nextTaskId=(await env.DB.prepare('SELECT next_task_id FROM task_recurrences WHERE previous_task_id=?').bind(id).first())?.next_task_id||null;
           const t2 = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
-          return json({ ok: true, task: t2, verify_readiness: readiness, ...(forced ? { forced: true, force_reason: forceReason } : {}) });
+          return json({ ok: true, task: t2, next_task_id:nextTaskId, verify_readiness: readiness, ...(forced ? { forced: true, force_reason: forceReason } : {}) });
         } else if (action === "reopen") {
           await env.DB.prepare("UPDATE tasks SET status='open', claimed_by=NULL, claimed_role=NULL, updated_at=? WHERE id=?").bind(now, id).run();
         } else if (action === "challenge") {
@@ -968,7 +996,9 @@ const businessWorker = {
 
 export default {
   async fetch(request, env, ctx) {
-    const response = await businessWorker.fetch(request, env, ctx);
+    let response;
+    try {response = await businessWorker.fetch(request, env, ctx);}
+    catch(error) {if(error instanceof PlanError) return err(error.message,error.status);throw error;}
     const path = new URL(request.url).pathname;
     if (!env.DB || !response.ok || request.method === "OPTIONS" || !/^\/api\/(tasks|messages|leaderboard)(\/|$)/.test(path)) return response;
     const labels = await displayLabels(env.DB);

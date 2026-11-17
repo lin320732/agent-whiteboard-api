@@ -1,13 +1,16 @@
 import { createCollaborationUI } from './collaboration.js';
 import { createAgentGuideUI } from './agent-guide.js';
+import { GOALS,legacyGoal,legacyType } from './task-model.js';
+import { createPlanEditor } from './task-plan-ui.js';
 const $ = id => document.getElementById(id);
 const state = { user: null, channels: [], tasks: [], selected: null, detail: null };
 const statusText = { open: "待认领", in_progress: "进行中", review: "待核对", proposed: "待审批", done: "已完成", closed: "已关闭" };
-const typeText = { research: "调研", creative: "创意", debate: "辩论", data: "数据" };
-const taskType = task => Object.hasOwn(typeText, task.type) ? task.type : "research";
-const typeBadge = task => node("span", typeText[taskType(task)], `badge task-type ${taskType(task)}`);
+const taskType = task => task.plan?.goal || task.goal || legacyGoal(task.type);
+const typeBadge = task => node("span", GOALS[taskType(task)] || taskType(task), `badge task-type ${taskType(task)}`);
 const roleText = { admin: "管理员", publisher: "发布者", viewer: "只读成员", agent: "Agent" };
-const workUI = createCollaborationUI({api,node,linkedText,button,user:()=>state.user,selectTask,notify});
+let taskPlanEditor=createPlanEditor({node}),planAuthors=[];
+$("taskPlanFields").append(taskPlanEditor.root);
+const workUI = createCollaborationUI({api,node,linkedText,button,user:()=>state.user,selectTask,notify,onParticipants:authors=>{planAuthors=authors;taskPlanEditor.setAuthors(authors);}});
 const guideUI = createAgentGuideUI({api,node,button,user:()=>state.user,notify});
 
 function node(tag, value = "", className = "") {
@@ -258,7 +261,9 @@ function detailActions(task, readiness, workflow) {
   if (!isAdmin) return null;
   const actions = node("div", null, "action-row");
   if (task.status === "proposed") {
-    add(actions, node("p", "请在上方指定主持人及验收要求，再批准提案。", "muted"), button("驳回提议", async () => {
+    if(task.plan?.collaboration==='open') add(actions,button('批准提案',()=>act(task.id,'approve'),'primary'));
+    else add(actions, node("p", "请在上方指定主持人及验收要求，再批准提案。", "muted"));
+    add(actions, button("驳回提议", async () => {
       if (confirm("确定驳回这条提议？")) await act(task.id, "reject");
     }, "danger"));
   }
@@ -483,8 +488,10 @@ $("channelFilter").addEventListener("change", () => { state.selected = null; ref
 $("taskForm").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
   try {
-    const result = await api("/api/tasks", "POST", { title: data.title, detail: data.detail, deadline: data.deadline, type: data.type, channelId: Number($("channelFilter").value || state.channels[0]?.id || 1) });
-    form.reset(); notify("任务已发布"); await refresh(); await selectTask(result.id);
+    const plan=taskPlanEditor.read();
+    const result = await api("/api/tasks", "POST", { title: data.title, detail: data.detail, deadline: data.deadline, plan, type:legacyType(plan.goal), channelId: Number($("channelFilter").value || state.channels[0]?.id || 1) });
+    form.reset();taskPlanEditor=createPlanEditor({node,authors:planAuthors});$("taskPlanFields").replaceChildren(taskPlanEditor.root);
+    notify("任务已发布"); await refresh(); await selectTask(result.id);
   } catch (error) { notify(error.message, true); }
 });
 $("channelForm").addEventListener("submit", async event => {

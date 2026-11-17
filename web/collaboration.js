@@ -1,5 +1,7 @@
 // UI for hosted tasks and topic exploration. All server text is rendered as text nodes.
-export function createCollaborationUI({api,node,linkedText,button,user,selectTask,notify}) {
+import {GOALS,COLLABORATION,SCHEDULES} from './task-model.js';
+import {createPlanEditor,displayPlan,reportLink} from './task-plan-ui.js';
+export function createCollaborationUI({api,node,linkedText,button,user,selectTask,notify,onParticipants=()=>{}}) {
   const append=(el,...children)=>{el.append(...children.filter(Boolean));return el;};
   const el=id=>document.getElementById(id);
   const isAdmin=()=>user()?.role==='admin';
@@ -50,33 +52,51 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
   ];
   function renderTask(data) {
     const {task}=data,w=data.workflow;if(!w) return null;
+    const plan=displayPlan(task,w.plan||data.plan);
     const root=node('div',null,'hosted-work'),live=!['done','closed','proposed'].includes(task.status);
     const manage=isAdmin()||(isAgent()&&w.host_id===user().id);
     const refresh=()=>selectTask(task.id);
     const post=async(path,b)=>{await api(`/api/tasks/${task.id}/${path}`,'POST',b);await refresh();};
+    const arrangements=section('任务目标与安排','task-arrangements');
+    append(arrangements,node('p',`${GOALS[plan.goal]} · ${COLLABORATION[plan.collaboration]} · ${SCHEDULES[plan.schedule.kind]}`),node('p',`验收：${plan.acceptance.criteria||'按交付要求确认'}；来源至少 ${plan.acceptance.min_sources} 条${plan.acceptance.independent_review?'；需要独立核查':''}${plan.acceptance.opposing_views?'；需要核对正反观点':''}`));
+    if(plan.schedule.start_at) append(arrangements,node('p',`计划开始：${dated(plan.schedule.start_at)}${plan.schedule.kind==='recurring'?` · 每 ${plan.schedule.interval_days} 天一期`:''}`));
+    if(plan.schedule.kind==='event') append(arrangements,node('p',`触发条件：${plan.schedule.event}${plan.schedule.triggered_at?' · 已确认发生':' · 等待确认发生'}`));
+    if(plan.schedule.trigger_note) append(arrangements,linkedText(plan.schedule.trigger_note));
+    if(w.report_author) append(arrangements,node('p',`主要作者：${w.report_author}`));
+    if(w.next_task_id) append(arrangements,button(`查看下一期 #${w.next_task_id}`,()=>selectTask(w.next_task_id)));
+    if(w.previous_task_id) append(arrangements,button(`查看上一期 #${w.previous_task_id}`,()=>selectTask(w.previous_task_id)));
     if(isAdmin()&&!['done','closed'].includes(task.status)) {
-      const setup=section(w.enabled?'主持与验收':'启用主持协作');
+      const e=createPlanEditor({node,plan,authors:participants,editing:true});
+      const f=node('form',null,'inline-form plan-settings'),error=node('p','','error'),save=node('button','保存任务安排','secondary');save.type='submit';append(f,e.root,save,error);
+      f.addEventListener('submit',async event=>{event.preventDefault();save.disabled=true;error.textContent='';try {await post('plan',{...e.read(),revision:plan.revision});} catch(err){error.textContent=err.message;} finally{save.disabled=false;}});
+      append(arrangements,editor('修改目标、验收与执行安排',f));
+    }
+    if((isAdmin()||isAgent())&&live&&plan.schedule.kind==='event'&&!plan.schedule.triggered_at) append(arrangements,form('trigger-form',[field('事件发生说明','note'),field('事件依据链接','evidence')],'确认事件已发生',b=>post('trigger',{...b,revision:plan.revision,evidence:urlList(b.evidence)})));
+    append(root,arrangements);
+    if(isAdmin()&&!['done','closed'].includes(task.status)) {
+      const setup=section(w.enabled&&w.host_id?'主持与验收':'启用主持协作');
       const setupForm=form('host-setup',[
         {...field('主持 Agent','host_id','select',agentOptions()),value:w.host_id||participants[0]?.id},
         {...field('验收要求','acceptance'),value:w.acceptance||''},
         {...field('最少来源数量','min_sources','number'),value:w.min_sources??1,min:0,max:20},
-      ],task.status==='proposed'?'指定主持并批准':w.enabled?'更新主持设置':'启用主持流程',async b=>{
+      ],task.status==='proposed'?'指定主持并批准':w.enabled&&w.host_id?'更新主持设置':'启用主持流程',async b=>{
         await api(`/api/tasks/${task.id}/workflow`,'POST',{...b,host_id:Number(b.host_id),min_sources:Number(b.min_sources)});
         if(task.status==='proposed') await api(`/api/tasks/${task.id}/approve`,'POST',{});
         await refresh();
       });
-      if(w.enabled) {const fold=node('details');append(fold,node('summary',`${w.host} 主持 · 修改设置`),setupForm);append(setup,fold);} else append(setup,editor('设置主持与验收',setupForm));
+      if(w.enabled&&w.host_id) {const fold=node('details');append(fold,node('summary',`${w.host} 主持 · 修改设置`),setupForm);append(setup,fold);} else append(setup,editor('设置主持与验收',setupForm));
       append(root,setup);
     }
     if(w.enabled) {
       const outcome=w.outcomes?.[0];
       const current=section('目前成果','current-outcome');
-      append(current,node('p',`主持：${w.host} · ${w.current_reviews?.length?'当前版本已独立核查':'待独立核查'}`, 'muted'),node('p',`验收：${w.acceptance}`));
+      append(current,node('p',`${w.host?`主持：${w.host}`:'自主认领协作'} · ${w.current_reviews?.length?'当前版本已独立核查':plan.acceptance.independent_review?'待独立核查':'按约定验收'}`, 'muted'),node('p',`验收：${w.acceptance||plan.acceptance.criteria}`));
+      if(outcome?.report) append(current,reportLink(node,outcome.report),node('p',`发布：${outcome.author} · ${dated(outcome.report.published_at)}；核查与问题均对应登记版本。`,'muted'));
       if(outcome) append(current,linkedText(outcome.summary),linkedText(outcome.links,'link-list'),node('p',`本次修改：${outcome.changes}`,'change-note'));
       else append(current,node('p','主持人尚未整理成果；原始提交保留在下方。','muted'));
       if(w.blocking) append(current,node('p',`${w.blocking} 项重要问题尚未解决`,'error'));
       if(w.waiting) append(current,node('p',`等待：${w.wait_reason} · 预计 ${dated(w.resume_at)} 恢复`));
-      if(manage&&live) {
+      if(manage&&live&&w.host_id) {
         const wait=append(node('details'),node('summary',w.waiting?'调整等待安排':'等待外部事件'));
         append(wait,form('task-wait-form',[field('等待原因','reason'),field('预计恢复时间','resume_at','datetime-local')],'设置恢复时间',b=>post('wait',{...b,resume_at:new Date(b.resume_at).toISOString()})));
         if(w.waiting) append(wait,button('立即恢复',()=>post('wait',{})));
@@ -84,23 +104,28 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
       }
       if(w.outcomes?.length>1) {
         const history=append(node('details'),node('summary',`历史成果（${w.outcomes.length-1}）`));
-        for(const o of w.outcomes.slice(1)) append(history,node('h5',`#${o.id} · ${o.author} · ${dated(o.created_at)}`),linkedText(o.summary),node('p',o.changes));
+        for(const o of w.outcomes.slice(1)) append(history,node('h5',`#${o.id} · ${o.author} · ${dated(o.created_at)}`),o.report?reportLink(node,o.report):null,linkedText(o.summary),node('p',o.changes));
         append(current,history);
       }
       append(root,current);
-      if(manage&&live) {
+      const publish=isAdmin()||(isAgent()&&(plan.delivery.format==='web_report'&&w.report_author_id?w.report_author_id===user().id:manage||(!w.host_id&&task.claimed_by===user().name)));
+      if(publish&&live) {
         const opts=sourceOptions(data,w);
         append(root,editor('编辑目前成果',form('outcome-form',[
           {...field('目前结论','summary'),rows:4,value:outcome?.summary||task.result_summary||''},
           {...field('交付或来源链接','links'),required:false,value:outcome?.links||task.result_links||''},
+          {...field('已发布报告链接（可选）','report_url','url'),required:plan.delivery.format==='web_report',value:outcome?.report?.url||''},
+          {...field('报告发布版本（填写新版本）','report_revision','text'),required:plan.delivery.format==='web_report'},
+          {...field('报告标题','report_title','text'),required:false,value:outcome?.report?.title||task.title},
           field('本次修改','changes'),
           {...field('采用的讨论或交付（可多选）','refs','multiple',opts),required:false,value:(outcome?.source_refs||[]).map(r=>`${r.kind}:${r.id}`)},
-        ],'更新成果',b=>post('outcomes',{summary:b.summary,links:urlList(b.links),changes:b.changes,source_refs:b.refs.map(s=>{const [kind,id]=s.split(':');return {kind,id:Number(id)};})}))));
+        ],'更新成果',b=>post('outcomes',{summary:b.summary,links:urlList(b.links),changes:b.changes,fingerprint:w.fingerprint,...(b.report_url?{report:{url:b.report_url,revision:b.report_revision,title:b.report_title||task.title}}:{}),source_refs:b.refs.map(s=>{const [kind,id]=s.split(':');return {kind,id:Number(id)};})}))));
       }
       const reviews=section('独立核查');
       for(const r of w.reviews||[]) append(reviews,node('p',`${r.reviewer} · ${r.fingerprint===w.fingerprint?'当前版本':'旧版本，需重新核查'}`),linkedText(r.note),linkedText(r.evidence,'link-list'));
       if(!w.reviews?.length) append(reviews,node('p','还没有独立核查记录。','muted'));
-      if(isAgent()&&live&&!w.author_ids.includes(user().id)) append(reviews,form('review-form',[field('核查说明','note'),field('查证链接','evidence')],'提交独立核查',b=>post('reviews',{...b,evidence:urlList(b.evidence),fingerprint:w.fingerprint})));
+      if(outcome?.report) append(reviews,node('p',`请打开报告 ${outcome.report.revision}，核实内容与来源，并检查页面展示；发现不足可在下方提出问题。`,'muted'));
+      if(isAgent()&&live&&!w.author_ids.includes(user().id)) append(reviews,form('review-form',[field('核查说明','note'),{...field('查证链接','evidence'),required:!!outcome?.report||plan.acceptance.min_sources>0,value:outcome?.report?.url||''}],'提交独立核查',b=>post('reviews',{...b,evidence:urlList(b.evidence),fingerprint:w.fingerprint,report_revision:outcome?.report?.revision})));
       append(root,reviews);
     }
     const issues=section('待回应的问题');
@@ -110,14 +135,14 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
       if(issue.response) append(card,node('strong',`回应 · ${issue.responder||''}`),linkedText(issue.response),linkedText(issue.evidence||'','link-list'));
       if(issue.resolution) append(card,node('p',`确认：${issue.resolution} · ${issue.resolver||''}`));
       if(live&&issue.state!=='resolved') {
-        if(manage||task.claimed_by===user()?.name) append(card,form('issue-response-form',[field('回应与修改','text'),{...field('修正依据链接','evidence'),required:false}],'提交回应',b=>post(`issues/${issue.id}/respond`,{...b,evidence:urlList(b.evidence)})));
+        if(manage||task.claimed_by===user()?.name||w.report_author_id===user()?.id||w.outcomes?.[0]?.author_id===user()?.id) append(card,form('issue-response-form',[field('回应与修改','text'),{...field('修正依据链接','evidence'),required:false}],'提交回应',b=>post(`issues/${issue.id}/respond`,{...b,evidence:urlList(b.evidence)})));
         if(isAgent()&&!w.author_ids.includes(user().id)&&issue.responder_id!==user().id&&issue.state==='responded') append(card,form('issue-dispute-form',[field('仍有分歧的原因','note')],'请用户裁决',b=>post(`issues/${issue.id}/dispute`,b)));
-        if(isAdmin()||(isAgent()&&!w.author_ids.includes(user().id)&&issue.responder_id!==user().id&&issue.state==='responded')) append(card,form('issue-resolution-form',[field('确认说明','note')],'确认解决',b=>post(`issues/${issue.id}/resolve`,{...b,revision:issue.revision})));
+        if(isAdmin()||(isAgent()&&!w.author_ids.includes(user().id)&&issue.responder_id!==user().id&&issue.state==='responded')) append(card,form('issue-resolution-form',[field('确认说明','note')],'确认解决',b=>post(`issues/${issue.id}/resolve`,{...b,revision:issue.revision,fingerprint:w.fingerprint})));
       }
       append(issues,card);
     }
     if(!w.issues?.length) append(issues,node('p','暂无未处理的问题。','muted'));
-    if((isAdmin()||isAgent())&&live) append(issues,editor('提出新问题或建议',form('issue-form',[field('问题或建议','text'),field('影响程度','severity','select',[{value:'blocking',label:'影响结论，需要解决'},{value:'suggestion',label:'改进建议，不阻挡交付'}])],'提出问题',b=>post('issues',b))));
+    if((isAdmin()||isAgent())&&live) append(issues,editor('提出新问题或建议',form('issue-form',[field('问题或建议','text'),field('影响程度','severity','select',[{value:'blocking',label:'影响结论，需要解决'},{value:'suggestion',label:'改进建议，不阻挡交付'}])],'提出问题',b=>post('issues',{...b,fingerprint:w.fingerprint}))));
     if(w.enabled||w.issues?.length) append(root,issues);
     if(w.enabled) {
       const subs=section('分工与接力（最多 3 项并行）');
@@ -148,7 +173,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
         }
         append(subs,card);
       }
-      if(manage&&live) append(subs,editor('安排新的分工',form('subtask-form',[field('子任务标题','title','text'),field('交付要求','deliverable'),field('受派 Agent','assignee_id','select',agentOptions()),field('交付期限','due_at','datetime-local')],'安排子任务',b=>post('subtasks',{...b,assignee_id:Number(b.assignee_id),due_at:new Date(b.due_at).toISOString()}))));
+      if(manage&&live&&w.host_id) append(subs,editor('安排新的分工',form('subtask-form',[field('子任务标题','title','text'),field('交付要求','deliverable'),field('受派 Agent','assignee_id','select',agentOptions()),field('交付期限','due_at','datetime-local')],'安排子任务',b=>post('subtasks',{...b,assignee_id:Number(b.assignee_id),due_at:new Date(b.due_at).toISOString()}))));
       append(root,subs);
       const credits=section('被采用的贡献','work-credits');append(root,credits);
       api(`/api/tasks/${task.id}/contributions`).then(result=>{
@@ -181,13 +206,15 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     if(canWrite()) {
       append(target,form('topic-reply-form',[field('回复内容','content'),{...field('引用发言','reply_to','select',[{value:'',label:'回复话题'},...d.replies.map(r=>({value:r.id,label:`${r.author} · ${r.content.slice(0,24)}`}))]),required:false}],'发送回复',async b=>{await api(`/api/topics/${id}/replies`,'POST',{content:b.content,...(b.reply_to?{reply_to:Number(b.reply_to)}:{})});await showTopic(id);}));
       const proposal=append(node('details'),node('summary','把发现整理为任务提案'));
-      append(proposal,form('proposal-form',[field('任务标题','title','text'),field('任务说明','detail'),field('预期交付','expected'),field('为什么值得做','value'),field('任务类型','type','select',[{value:'research',label:'调研'},{value:'data',label:'数据'},{value:'creative',label:'创意'},{value:'debate',label:'辩论'}])],'提交任务提案',async b=>{await api(`/api/topics/${id}/propose`,'POST',b);notify('提案已提交，等待管理员批准');await showTopic(id);}));
+      const proposalPlan=createPlanEditor({node,authors:participants});
+      const proposalForm=form('proposal-form',[field('任务标题','title','text'),field('任务说明','detail'),field('预期交付','expected'),field('为什么值得做','value')],'提交任务提案',async b=>{await api(`/api/topics/${id}/propose`,'POST',{...b,plan:proposalPlan.read()});notify('提案已提交，等待管理员批准');await showTopic(id);});
+      proposalForm.insertBefore(proposalPlan.root,proposalForm.querySelector('button[type="submit"]'));append(proposal,proposalForm);
       append(target,proposal);
     }
   }
   async function refreshHome() {
     const results=await Promise.allSettled([api('/api/participants'),api('/api/digest'),api('/api/inbox'),api('/api/topics')]);
-    if(results[0].status==='fulfilled') participants=results[0].value.agents;
+    if(results[0].status==='fulfilled') {participants=results[0].value.agents;onParticipants(participants);}
     const highlights=el('dailyHighlights'),inbox=el('workInbox'),list=el('topicList');
     if(results[1].status==='fulfilled') {
       highlights.replaceChildren();const d=results[1].value;
@@ -198,7 +225,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     if(results[2].status==='fulfilled') {
       inbox.replaceChildren();const d=results[2].value;
       for(const i of d.items) append(inbox,button(`${i.title} · ${i.reason||stateText[i.state]||i.kind}`,()=>selectTask(i.task_id)));
-      for(const i of d.waiting) append(inbox,node('p',`${i.title} · 等待至 ${dated(i.resume_at)}`,'muted'));
+      for(const i of d.waiting) append(inbox,node('p',`${i.title} · ${i.resume_at?`等待至 ${dated(i.resume_at)}`:i.reason||'等待外部事件'}`,'muted'));
       if(!d.items.length&&!d.waiting.length) append(inbox,node('p','目前没有分配给你的待办。','muted'));
     }
     if(results[3].status==='fulfilled') {

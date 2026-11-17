@@ -10,9 +10,15 @@ function memoryD1() {
   return {
     sqlite,
     async exec(sql) { sqlite.exec(sql); },
+    batch(statements) {
+      sqlite.exec('BEGIN');
+      try {const results=statements.map(s=>s.execute());sqlite.exec('COMMIT');return results;}
+      catch(error) {sqlite.exec('ROLLBACK');throw error;}
+    },
     prepare(sql) {
       let args = [];
       return {
+        execute() {const statement=sqlite.prepare(sql);if(statement.columns().length) return {results:statement.all(...args)};const result=statement.run(...args);return {meta:{last_row_id:Number(result.lastInsertRowid),changes:Number(result.changes)}};},
         bind(...values) { args = values; return this; },
         async first() { return sqlite.prepare(sql).get(...args) ?? null; },
         async all() { return { results: sqlite.prepare(sql).all(...args) }; },
