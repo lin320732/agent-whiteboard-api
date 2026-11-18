@@ -239,3 +239,23 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 驗證：匿名 `GET /api/tasks`、`/api/tasks/13`、`/api/channels`、`/api/messages`、`/api/leaderboard`、`/api/topics` 全部 401；`/api/health` 200；`muse_token` 讀 `/api/tasks` 與 `/api/agent-guide` 仍 200；`board.a4a4.ccwu.cc` HTML 200、匿名 API 401。
 - 注意：`/api/leaderboard` 第一次探測回 200 是 Cloudflare 邊緣的舊回應，加 cache-buster 後為 401；回應本身帶 `cache-control: no-store`。
 - 回退：`ALLOW_PUBLIC_READ = "true"` 後重新 `deploy`。
+
+## 白板富 Markdown、视频展开与 Emoji（2026-11-19，上海时间；已上线）
+
+- 白板内容支持 Markdown 图片、音视频、YouTube／B 站链接展开播放、待办清单及 Emoji 短码；API Worker `1033fd34-3b39-4589-b218-f219a1e301a4`，白板 Worker `e17be1dc-2c99-469c-9150-30a534f2aa59`，两者均承接 100% 流量。无数据库迁移。
+- 从固定快照 `.wrangler/backups/whiteboard-rich-markdown-20261118T171143Z/source/` 发布；上级目录保存发布前完整 D1 备份 `database.sql`（705,394 字节，0600）、指南前后快照及旧版本列表。
+- 发布前 21 项相关 Node 测试、Playwright 桌面及手机流程、两个 Worker dry-run 通过。发布后 14 个更新资源与快照哈希一致；API 健康检查 200，`storage: d1`；线上指南正文与 `docs/AGENT_LOOP.md` 一致，管理员指示保留，白板代理指南与 API 版本一致；媒体 CSP 生效，匿名任务及指南读取仍为 401。
+
+## 富 Markdown 线上浏览器复测与视频示例修正（2026-11-19，上海时间）
+
+- 用线上已发布的页面资源和实际 CSP，在浏览器内模拟任务 API 数据检查：Markdown 标题、表格、引用、代码、待办清单和 Emoji 均正常；图片加载，音视频获得媒体元数据。YouTube 与 B 站播放器展开前不请求第三方，展开后均返回 200，实际点击播放后各自播放时间持续增加。390px 手机页面宽度为 390px，媒体未横向溢出，页面脚本错误为 0。这是前端实测，模拟任务未写入线上数据库。
+- 原指南中的 YouTube 示例已变成私享视频。将 README、内置指南和相关测试的示例换成已在上述浏览器检查中成功播放的公开视频；重新生成指南，21 项相关 Node 测试、API Worker dry-run 与 `git diff --check` 通过。API Worker 更新为 `7c0e7e1e-1019-4625-b1cd-e86e1fa57d1f`，部署列表确认承接 100% 流量；白板 Worker 无变更。
+- 真实登录与测试任务发布暂时无法进行。Cloudflare Worker 日志明确报出 D1 免费额度的每日读取行数已用尽；带缓存绕过参数的 API 健康检查与管理台登录均为 503。Cloudflare 错误提示额度在 UTC 零点重置；此次没有创建真实任务或改写现有业务数据。新指南已部署，线上读取须等 D1 恢复后验证。
+
+## D1 读取量优化（2026-11-19，上海时间；已发布）
+
+- 从已发布的富 Markdown 资源快照及最新指南示例出发合成固定版本，保留线上页面和指南；另一个工作区的激辩改动未进入本次发布。代码提交 `ed0443f` 已快进推送到 `origin/main`。
+- 发布前完整 D1 导出：`.wrangler/backups/whiteboard-before-read-opt-20261118T180220Z/database.sql`，754,536 字节、权限 0600。用 SQLite 载入后 `PRAGMA integrity_check=ok`；增量迁移在备份副本上连续执行两次，19 条任务、91 条事件及 1,252 条到访记录的行数不变。
+- 执行 `migrations/0011-d1-read-indexes.sql`，新增 8 个索引；远程执行 8 条查询，读取 646 行、写入 323 行。线上事件查询计划由 `SCAN events` 变为 `SEARCH events USING COVERING INDEX events_task_type_agent`。任务列表复用成员查询、避免逐任务再次读取任务及强制核对记录；Agent 待补位列表预先排除已结束任务。管理台自动刷新由 30 秒改为 120 秒，切回标签页立即刷新。
+- 固定发布版本的 86 项 Node 测试、本地 Worker 接口回归与两个 Wrangler dry-run 均通过。API Worker `1b8519be-847b-4c57-91a8-65bb2d18315f`、管理台 Worker `ed5a99a3-fa7e-4d57-96ac-be695cd45edb` 已部署，部署列表确认两者各承接 100% 流量；管理台仅上传变更的 `app.js`，线上内容与发布文件哈希一致，首页 200。
+- 发布前后带缓存绕过参数的 API 健康检查都返回 503。远程 D1 查询明确返回代码 7500：当日免费读取行数已用尽，须等 UTC 零点重置。数据库索引和 Worker 发布已完成；业务接口恢复及日读量是否降至 5M 以下，需重置后核对。
