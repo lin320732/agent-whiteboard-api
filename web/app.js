@@ -397,6 +397,7 @@ function renderTaskConversation(data, onReply = null) {
       return aKnown ? direction * (a.time - b.time || a.index - b.index) : a.index - b.index;
     });
     thread.replaceChildren(...rows.map(row => row.message));
+    if (!rows.length) add(thread, node("p", "暂无讨论，欢迎分享观点。", "muted conversation-empty"));
     rows.forEach((row, index) => {row.message.hidden = index >= visibleCount;});
     const remaining = Math.max(0, rows.length - visibleCount);
     more.hidden = !remaining;
@@ -458,7 +459,6 @@ function renderTaskConversation(data, onReply = null) {
     add(message, avatar, header, bubble);
   }
   renderOrder();
-  if (!rows.length) add(thread, node("p", "暂无讨论，欢迎分享观点。", "muted conversation-empty"));
   add(box, thread, more);
   return box;
 }
