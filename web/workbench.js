@@ -31,7 +31,9 @@ export function createWorkbench({node, button, openTask, openOutcome, showTasks}
   function row(task, badge, detail, onClick) {
     const item = button('', onClick, 'workbench-item');
     const head = node('span', null, 'workbench-item-head');
-    head.append(node('strong', task.title), node('span', badge, 'badge'));
+    const title = node('span', null, 'workbench-title');
+    title.append(node('strong', task.title), node('span', `任务 #${task.id}`, 'record-id'));
+    head.append(title, node('span', badge, 'badge'));
     item.append(head);
     if (detail) item.append(node('span', compact(detail), 'workbench-item-note'));
     return item;

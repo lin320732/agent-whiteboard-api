@@ -103,7 +103,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
       const outcome=w.outcomes?.[0];
       if(w.outcomes?.length>1) {
         const history=append(node('details',null,'work-editor'),node('summary',`历史成果（${w.outcomes.length-1}）`));
-        for(const o of w.outcomes.slice(1)) append(history,node('h5',`#${o.id} · ${o.author} · ${dated(o.created_at)}`),o.report?reportLink(node,{...o.report,title:o.report.title||task.title,revision:o.report.revision||'已登记'}):null,linkedText(o.summary),linkedText(o.changes));
+        for(const o of w.outcomes.slice(1)) append(history,node('h5',`成果 #${o.id} · ${o.author} · ${dated(o.created_at)}`),o.report?reportLink(node,{...o.report,title:o.report.title||task.title,revision:o.report.revision||'已登记'}):null,linkedText(o.summary),linkedText(o.changes));
         append(mount('outcome'),history);
       }
       const publish=isAdmin()||(isAgent()&&(plan.delivery.format==='web_report'&&w.report_author_id?w.report_author_id===user().id:manage||(!w.host_id&&task.claimed_by===user().name)));
@@ -135,7 +135,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     const issues=section('待回应的问题');
     for(const issue of w.issues||[]) {
       const card=section(`${issue.severity==='blocking'?'重要问题':'建议'} · ${stateText[issue.state]}`,'work-issue');
-      append(card,node('p',`#${issue.id} · ${issue.author}${issue.outcome_id?` · 针对成果 #${issue.outcome_id}`:''}`,'muted'),linkedText(issue.text));
+      append(card,node('p',`问题 #${issue.id} · ${issue.author}${issue.outcome_id?` · 针对成果 #${issue.outcome_id}`:''}`,'muted'),linkedText(issue.text));
       if(issue.response) append(card,node('strong',`回应 · ${issue.responder||''}`),linkedText(issue.response),linkedText(issue.evidence||'','link-list'));
       if(issue.resolution) append(card,node('p',`确认：${issue.resolution} · ${issue.resolver||''}`));
       if(live&&issue.state!=='resolved') {
@@ -151,7 +151,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     if(w.enabled) {
       const subs=section('分工与接力（最多 3 项并行）');
       for(const s of w.subtasks||[]) {
-        const card=section(s.title,'work-subtask');
+        const card=section(`子任务 #${s.id} · ${s.title||'未命名'}`,'work-subtask');
         append(card,node('p',`${s.assignee} · ${stateText[s.state]}${s.ack_overdue?' · 接单已逾期':''}`),linkedText(s.deliverable),node('p',`期限：${dated(s.due_at)}`,'muted'));
         if(s.wait_reason) append(card,node('p',`等待：${s.wait_reason} · ${dated(s.resume_at)}`));
         if(s.summary) append(card,linkedText(s.summary),linkedText(s.links,'link-list'));
@@ -184,7 +184,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
       api(`/api/tasks/${task.id}/contributions`).then(result=>{
         if(!credits.isConnected) return;
         for(const c of result.contributions) {
-          const card=append(node('div',null,'contribution-card'),node('strong',c.author),linkedText(c.note),node('small',c.confirmed_by?`已确认 · ${c.confirmer||''}`:'等待独立确认'));
+          const card=append(node('div',null,'contribution-card'),node('strong',`贡献 #${c.id} · ${c.author}`),linkedText(c.note),node('small',c.confirmed_by?`已确认 · ${c.confirmer||''}`:'等待独立确认'));
           if(!c.confirmed_by&&(isAdmin()||isAgent())&&c.author_id!==user().id) append(card,form('',[field('采用确认依据','note')],'确认采用',b=>post(`contributions/${c.id}/confirm`,b)));
           append(credits,card);
         }
@@ -203,7 +203,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     const d=await api(`/api/topics/${id}`),target=el('topicDetail');
     if(currentTopic!==id) return;
     target.replaceChildren();
-    append(target,node('h3',d.topic.title),node('p',d.topic.author,'muted'),linkedText(d.topic.content),linkedText(d.topic.links||'','link-list'));
+    append(target,node('h3',d.topic.title),node('p',`话题 #${d.topic.id||id} · ${d.topic.author}`,'muted'),linkedText(d.topic.content),linkedText(d.topic.links||'','link-list'));
     const byId=new Map(d.replies.map(r=>[String(r.id),r]));
     let quoteSelect=null,quotePreview=null,replyText=null;
     const pickQuote=reply=>{
@@ -214,14 +214,14 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     for(const r of d.replies) {
       const card=node('article',null,'topic-reply');card.id=`topic-reply-${r.id}`;
       const head=node('header',null,'topic-reply-head');
-      append(head,node('strong',r.author||'未知作者'));
+      append(head,node('strong',r.author||'未知作者'),node('span',`回复 #${r.id}`,'record-id'));
       append(card,head);
       if(r.reply_to!=null&&r.reply_to!=='') {
         const cited=byId.get(String(r.reply_to));
         const quote=node(cited?'a':'div',null,cited?'reply-reference':'reply-reference is-missing');
         if(cited) {
           quote.href=`#topic-reply-${cited.id}`;
-          append(quote,node('span',`↳ 回复 ${cited.author||'未知作者'}`,'reply-target'),node('small',clip(cited.content,100),'reply-excerpt'));
+          append(quote,node('span',`↳ 回复 ${cited.author||'未知作者'} · 回复 #${cited.id}`,'reply-target'),node('small',clip(cited.content,100),'reply-excerpt'));
           quote.addEventListener('click',event=>{event.preventDefault();flash(document.getElementById(`topic-reply-${cited.id}`));});
         } else append(quote,node('span',`↳ 引用 #${r.reply_to} · 原发言不可见`,'reply-target'));
         append(card,quote);
@@ -230,21 +230,21 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
       if(canWrite()) {const respond=button('回复',()=>pickQuote(r),'text-button');respond.setAttribute('aria-label',`回复 ${r.author||'未知作者'}`);append(card,respond);}
       append(target,card);
     }
-    for(const t of d.proposals||[]) append(target,button(`提案：${t.title} · ${t.status}`,()=>selectTask(t.id)));
+    for(const t of d.proposals||[]) append(target,button(`任务 #${t.id} · 提案：${t.title} · ${t.status}`,()=>selectTask(t.id)));
     if(canWrite()) {
       const replyForm=node('form',null,'inline-form topic-reply-form');
       const contentLabel=node('label','回复内容');
       replyText=node('textarea');replyText.name='content';replyText.rows=3;replyText.required=true;append(contentLabel,replyText);
       const quoteLabel=node('label','引用发言');
       quoteSelect=node('select');quoteSelect.name='reply_to';quoteSelect.add(new Option('回复话题',''));
-      for(const r of d.replies) quoteSelect.add(new Option(`${r.author||'未知作者'} · ${clip(r.content,24)}`,String(r.id)));
+      for(const r of d.replies) quoteSelect.add(new Option(`回复 #${r.id} · ${r.author||'未知作者'} · ${clip(r.content,24)}`,String(r.id)));
       append(quoteLabel,quoteSelect);
       quotePreview=node('div',null,'reply-preview');quotePreview.setAttribute('role','status');quotePreview.setAttribute('aria-live','polite');quotePreview.hidden=true;
       quoteSelect.addEventListener('change',()=>{
         quotePreview.replaceChildren();
         const cited=byId.get(quoteSelect.value);
         if(!cited) {quotePreview.hidden=true;return;}
-        append(quotePreview,node('strong',`↳ 正在回复 ${cited.author||'未知作者'}`),node('small',clip(cited.content,100)));
+        append(quotePreview,node('strong',`↳ 正在回复 ${cited.author||'未知作者'} · 回复 #${cited.id}`),node('small',clip(cited.content,100)));
         quotePreview.hidden=false;
       });
       const error=node('p','','error');error.setAttribute('role','alert');
@@ -271,7 +271,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     if(results[0].status==='fulfilled') {participants=results[0].value.agents;onParticipants(participants);}
     const list=el('topicList');
     if(results[3].status==='fulfilled') {
-      list.replaceChildren();for(const t of results[3].value.topics) append(list,button(`${t.title} · ${t.author} · ${t.replies} 回复`,()=>showTopic(t.id)));
+      list.replaceChildren();for(const t of results[3].value.topics) append(list,button(`话题 #${t.id} · ${t.title} · ${t.author} · ${t.replies} 回复`,()=>showTopic(t.id)));
       if(!results[3].value.topics.length) append(list,node('p','分享一个发现，或提出值得一起探索的问题。','muted'));
       const composer=el('topicComposer');
       if(!composer.querySelector('form')) {

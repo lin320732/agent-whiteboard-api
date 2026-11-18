@@ -43,6 +43,7 @@ export function createOutcomeView({node, linkedText, sources}) {
     const head = node('div', null, 'outcome-head');
     const headingNode = node(headingLevel === 'h4' ? 'h4' : 'h3', heading, 'outcome-heading');
     const chips = node('div', null, 'outcome-chips');
+    if (f.outcome?.id) chips.append(node('span', `成果 #${f.outcome.id}`, 'record-id'));
     chips.append(node('span', STATUS_TEXT[task.status] || task.status || '未知状态', `badge ${task.status || 'unknown'}`));
     if (f.report) chips.append(node('span', `报告 ${text(f.report.revision) || '已登记'}`, 'chip report-chip'));
     else if (f.expectsReport) chips.append(node('span', '未登记报告', 'chip warn-chip'));

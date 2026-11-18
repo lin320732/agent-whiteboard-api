@@ -425,6 +425,10 @@ function renderTaskConversation(data, onReply = null) {
     const header = node("header", null, "conversation-header");
     const label = kind === "debate" ? item.stance : kind === "challenge" ? "质疑" : `补充 v${item.version}`;
     add(header, node("strong", name, "conversation-speaker"), node("span", item.role === "human" ? "成员" : "Agent", "conversation-role"), node("span", label, `conversation-tag ${kind}`));
+    if (Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0) {
+      const kindName = kind === "debate" ? "发言" : kind === "challenge" ? "质疑" : "补充";
+      add(header, node("span", `${kindName} #${item.id}`, "record-id"));
+    }
     if (Number.isFinite(time)) {
       const stamp = node("time", new Date(time).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }), "conversation-time");
       stamp.dateTime = item.created_at;
@@ -438,7 +442,7 @@ function renderTaskConversation(data, onReply = null) {
       if (cited) {
         quote.href = `#debate-${replyId}`;
         quote.setAttribute("aria-label", `跳到 ${cited.agent || "未知作者"} 的第 ${replyId} 条发言`);
-        add(quote, node("span", `↳ 回复 ${cited.agent || "未知作者"} · #${replyId}`, "reply-target"), node("small", excerpt(cited.content), "reply-excerpt"));
+        add(quote, node("span", `↳ 回复 ${cited.agent || "未知作者"} · 发言 #${replyId}`, "reply-target"), node("small", excerpt(cited.content), "reply-excerpt"));
         quote.addEventListener("click", event => {
           event.preventDefault();
           flash(document.getElementById(`debate-${replyId}`));
@@ -504,11 +508,12 @@ function setChannel(id) {
 }
 function renderTasks() {
   const status = $('statusFilter').value, query = $('taskSearch').value.trim().toLocaleLowerCase();
+  const idQuery = query.replace(/^#/, '');
   state.tasks = state.allTasks.filter(task => {
     if (status === 'active' && ['done', 'closed'].includes(task.status)) return false;
     if (status && status !== 'active' && task.status !== status) return false;
     if (state.channelId && String(task.channel_id) !== state.channelId) return false;
-    return !query || [task.title, task.claimed_by, task.host, task.created_by, task.collaboration?.reason].some(value => String(value || '').toLocaleLowerCase().includes(query));
+    return !query || String(task.id) === idQuery || [task.title, task.claimed_by, task.host, task.created_by, task.collaboration?.reason].some(value => String(value || '').toLocaleLowerCase().includes(query));
   });
   const direction = $('taskSort').value === 'asc' ? 1 : -1;
   state.tasks.sort((a, b) => {
@@ -525,7 +530,7 @@ function renderTasks() {
     const item = node("button", null, "task-item" + (active ? " active" : ""));
     item.type = "button";
     item.setAttribute("aria-pressed", String(active));
-    add(item, node("strong", task.title));
+    add(item, add(node("div", null, "record-title"), node("strong", task.title), node("span", `任务 #${task.id}`, "record-id")));
     const row = node("div", null, "task-line");
     add(row, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task));
     if (task.collaboration?.help_wanted) add(row, node("span", "待协作", "badge help-wanted"));
@@ -547,7 +552,7 @@ async function refreshMessages() {
 }
 function renderMessages(messages) {
   const target = clear($("messages"));
-  for (const message of messages) add(target, entry(`${message.author} · ${message.role === "human" ? "成员" : "Agent"}`, message.text, message.created_at));
+  for (const message of messages) add(target, entry(`${message.author} · ${message.role === "human" ? "成员" : "Agent"}${message.id ? ` · 消息 #${message.id}` : ''}`, message.text, message.created_at));
   if (!messages.length) add(target, node("p", "还没有讨论，欢迎发出第一条消息。", "muted"));
   const channelId = state.channelId;
   const channel = state.channels.find(row => String(row.id) === channelId);
@@ -579,7 +584,7 @@ function renderOutcomeLists() {
       const item = node("button", null, "outcome-item" + (active ? " active" : ""));
       item.type = "button";
       item.setAttribute("aria-pressed", String(active));
-      add(item, node("strong", task.title));
+      add(item, add(node("div", null, "record-title"), node("strong", task.title), node("span", `任务 #${task.id}`, "record-id")));
       const row = node("div", null, "task-line");
       add(row, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task));
       if (task.report?.revision) add(row, node("span", `报告 ${task.report.revision}`, "chip report-chip"));
@@ -615,7 +620,7 @@ function renderOutcomeReader(data) {
   const target = clear($("outcomeDetail"));
   target.classList.remove("empty");
   const head = node("div", null, "detail-head");
-  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("h3", task.title));
+  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"), node("h3", task.title));
   add(target, head);
   add(target, outcomeView.summaryBlock(task, data, { heading: "成果总结" }));
   const original = originalSubmission(data);
@@ -625,7 +630,7 @@ function renderOutcomeReader(data) {
     const history = node("details", null, "work-editor");
     add(history, node("summary", `历史成果（${outcomes.length - 1}）`));
     for (const outcome of outcomes.slice(1)) {
-      add(history, node("h5", `#${outcome.id} · ${outcome.author || "未知作者"}`));
+      add(history, node("h5", `成果 #${outcome.id} · ${outcome.author || "未知作者"}`));
       if (outcome.report) {
         const report = reportLink(node, outcome.report);
         if (report) add(history, report);
@@ -756,7 +761,7 @@ function debateForm(task, debate) {
   reply.add(new Option("不引用其他发言", ""));
   for (const item of debate) {
     if (Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0)
-      reply.add(new Option(`#${item.id} · ${item.agent}: ${String(item.content || "").slice(0, 24)}`, String(item.id)));
+      reply.add(new Option(`发言 #${item.id} · ${item.agent}: ${String(item.content || "").slice(0, 24)}`, String(item.id)));
   }
   replyLabel.append(reply);
   const preview = node("div", null, "reply-preview");
@@ -765,7 +770,7 @@ function debateForm(task, debate) {
     clear(preview);
     const selected = debate.find(item => String(item.id) === reply.value);
     if (!selected) { preview.hidden = true; return; }
-    add(preview, node("strong", `↳ 正在回复 ${selected.agent || "未知作者"} · #${selected.id}`), node("span", excerpt(selected.content)));
+    add(preview, node("strong", `↳ 正在回复 ${selected.agent || "未知作者"} · 发言 #${selected.id}`), node("span", excerpt(selected.content)));
     preview.hidden = false;
   });
   const contentLabel = node("label", "发言内容");
@@ -842,7 +847,7 @@ function renderTaskDetail(data) {
   target.classList.remove("empty");
 
   const head = node("div", null, "detail-head");
-  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("h3", task.title));
+  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"), node("h3", task.title));
   const meta = node("div", null, "task-meta");
   add(meta, node("span", data.workflow?.discussion?'参与：开放激辩，无需认领':`负责：${data.workflow?.host || task.claimed_by || '待认领'}`));
   if (task.deadline) add(meta, node('span', `截止：${task.deadline}`));
