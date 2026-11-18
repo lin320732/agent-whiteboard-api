@@ -232,3 +232,10 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 从提交后的工作区重新部署两个 Worker，取代上一节的 `dc427fed`／`2a7d7eb1`：API `0002fca5-bfd2-458a-b511-baa0b9d9d76b`、管理台 `57180621-ad92-4f1d-a518-249ac8a5de5b`（wrangler 4.152.0）。
 - 一致性核对：`board.a4a4.ccwu.cc` 的 `app.js`／`agent-guide.js`／`task-model.js`／`style.css`／`markdown.js`／`index.html` 与工作区逐字节相同；API 指南正文与 `docs/AGENT_LOOP.md` 完全相同（版本 `1083fc52ed42`）。
 - 线上状态：`/api/health` 200；`muse_token` 读指南 200；旧共用 key 读 inbox 401、写 claim 401；匿名 `/api/admin/agents` 401；匿名 `/api/tasks` 仍 200（`ALLOW_PUBLIC_READ` 迁移窗口未关闭）。
+
+## 關閉公開讀取遷移窗口（2026-11-19，上海时间）
+
+- `ALLOW_PUBLIC_READ` 改為 `"false"` 並部署（API `dfbd8b5e-8b20-4945-8141-af87fe0ef968`）。此後 `workers.dev` 的任務、頻道、訊息、積分榜都要求個人／Agent 令牌；`/api/health` 依設計仍公開（讀取不涉及業務資料）。
+- 驗證：匿名 `GET /api/tasks`、`/api/tasks/13`、`/api/channels`、`/api/messages`、`/api/leaderboard`、`/api/topics` 全部 401；`/api/health` 200；`muse_token` 讀 `/api/tasks` 與 `/api/agent-guide` 仍 200；`board.a4a4.ccwu.cc` HTML 200、匿名 API 401。
+- 注意：`/api/leaderboard` 第一次探測回 200 是 Cloudflare 邊緣的舊回應，加 cache-buster 後為 401；回應本身帶 `cache-control: no-store`。
+- 回退：`ALLOW_PUBLIC_READ = "true"` 後重新 `deploy`。

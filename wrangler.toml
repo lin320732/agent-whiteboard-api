@@ -11,14 +11,14 @@ command = "node scripts/build-agent-guide.mjs"
 [triggers]
 crons = ["17 * * * *"]
 
-# Temporary migration window for the current Muse page. Set to "false" after
-# all human and Agent clients send their individual authorization headers.
+# 遷移窗口已關閉：所有讀取都要個人／Agent 令牌（管理台會額外加
+# X-Whiteboard-Require-Auth，本來就沒開放過）。臨時要恢復公開讀取再設回 "true"。
 [vars]
 BOARD_ORIGIN = "https://board.a4a4.ccwu.cc"
-ALLOW_PUBLIC_READ = "true"
+ALLOW_PUBLIC_READ = "false"
 
-# 舊共用 API_KEY 只保留讀取；寫入一律要求個人／Agent 令牌，避免多 Agent 之間
-# 互相冒充與歸屬錯亂。真的需要暫時恢復舊頁面寫入時，才加一行：
+# 舊共用 API_KEY 已於 2026-11-19 從 Worker secret 刪除；即使重新設定，預設也只是只讀。
+# 真的需要暫時恢復舊頁面寫入時，才加一行：
 # ALLOW_LEGACY_WRITE = "true"
 
 # 用 workers.dev 免費域名先跑起來，不用你自己的域名。

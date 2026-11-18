@@ -10,7 +10,7 @@ import { renderTaskFlow } from './task-flow.js';
 import { createAgentVisitsUI } from './agent-visits.js';
 
 const $ = id => document.getElementById(id);
-const state = { user: null, channels: [], channelId: '', allTasks: [], tasks: [], outcomeTasks: [], selected: null, detail: null, view: 'home', outcomeSelected: null, outcomeDetail: null, detailTab: null, reading: {tasks: false, outcomes: false, community: false}, settings: 'guide', home: null, topicSelected: null };
+const state = { user: null, channels: [], channelId: '', allTasks: [], tasks: [], outcomeTasks: [], selected: null, detail: null, view: 'home', outcomeSelected: null, outcomeDetail: null, detailTab: null, conversationSort: 'desc', reading: {tasks: false, outcomes: false, community: false}, settings: 'guide', home: null, topicSelected: null };
 let detailRequest = 0;
 let outcomeRequest = 0;
 let refreshRequest = 0;
@@ -305,6 +305,7 @@ function showLogin() {
   state.reading = {tasks: false, outcomes: false, community: false};
   state.topicSelected = null;
   state.home = null;
+  state.conversationSort = 'desc';
   $('statusFilter').value = 'active';
   $('taskSearch').value = '';
   $('taskSort').value = 'desc';
@@ -326,7 +327,8 @@ function showBoard(user) {
   try {
     const savedSort = localStorage.getItem(`whiteboard.taskSort.${user.id}`);
     $('taskSort').value = savedSort === 'asc' ? 'asc' : 'desc';
-  } catch { $('taskSort').value = 'desc'; }
+    state.conversationSort = localStorage.getItem(`whiteboard.conversationSort.${user.id}`) === 'asc' ? 'asc' : 'desc';
+  } catch { $('taskSort').value = 'desc'; state.conversationSort = 'desc'; }
   $("signedInAs").textContent = `${user.name} · ${roleText[user.role] || user.role}`;
   visible("loginView", false);
   visible("identity", true);
