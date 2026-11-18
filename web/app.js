@@ -363,10 +363,19 @@ function section(title) {
   return box;
 }
 
-// ---- 任务对话：chronological 合并发言、质疑与补充，回复用引用卡关联 ----
+// ---- 任务对话：按时间合并发言、质疑与补充，回复用引用卡关联 ----
 function excerpt(value, size = 100) { return Array.from(String(value || "").trim()).slice(0, size).join(""); }
 function renderTaskConversation(data, onReply = null) {
-  const box = section("任务对话");
+  const box = node("section", null, "detail-section");
+  const toolbar = node("div", null, "conversation-toolbar");
+  const sortLabel = node("label", "排序");
+  const sort = node("select", null, "conversation-sort");
+  sort.add(new Option("时间倒序（最新在前）", "desc"));
+  sort.add(new Option("时间正序（最早在前）", "asc"));
+  sort.value = state.conversationSort;
+  add(sortLabel, sort);
+  add(toolbar, node("h4", "任务对话"), sortLabel);
+  add(box, toolbar);
   const thread = node("div", null, "conversation");
   const debate = data.debate || [];
   const byId = new Map(debate.filter(item => Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0).map(item => [Number(item.id), item]));
@@ -375,18 +384,34 @@ function renderTaskConversation(data, onReply = null) {
     ...(data.challenges || []).map(item => ({ kind: "challenge", item })),
     ...(data.supplements || []).map(item => ({ kind: "supplement", item })),
   ].map((row, index) => ({ ...row, index, time: Date.parse(row.item.created_at) }));
-  rows.sort((a, b) => (Number.isFinite(a.time) ? a.time : Infinity) - (Number.isFinite(b.time) ? b.time : Infinity) || a.index - b.index);
-  let firstVisible = Math.max(0, rows.length - 10);
+  let visibleCount = 10;
   const more = button('', () => {
-    firstVisible = Math.max(0, firstVisible - 10);
-    [...thread.children].forEach((message, index) => {message.hidden = index < firstVisible;});
-    updateMore();
+    visibleCount += 10;
+    renderOrder();
   }, 'text-button conversation-more');
-  function updateMore() {more.hidden = !firstVisible; more.textContent = `查看更早的讨论（${firstVisible}）`;}
-  updateMore(); add(box, more);
-  for (const [position, { kind, item, time }] of rows.entries()) {
+  function renderOrder() {
+    const direction = sort.value === 'asc' ? 1 : -1;
+    rows.sort((a, b) => {
+      const aKnown = Number.isFinite(a.time), bKnown = Number.isFinite(b.time);
+      if (aKnown !== bKnown) return aKnown ? -1 : 1;
+      return aKnown ? direction * (a.time - b.time || a.index - b.index) : a.index - b.index;
+    });
+    thread.replaceChildren(...rows.map(row => row.message));
+    rows.forEach((row, index) => {row.message.hidden = index >= visibleCount;});
+    const remaining = Math.max(0, rows.length - visibleCount);
+    more.hidden = !remaining;
+    more.textContent = `${direction < 0 ? '查看更早' : '查看更新'}的讨论（${remaining}）`;
+  }
+  sort.addEventListener('change', () => {
+    state.conversationSort = sort.value;
+    try { localStorage.setItem(`whiteboard.conversationSort.${state.user.id}`, sort.value); } catch { /* storage unavailable */ }
+    visibleCount = 10;
+    renderOrder();
+  });
+  for (const row of rows) {
+    const { kind, item, time } = row;
     const message = node("article", null, `conversation-message ${kind}${item.role === "human" ? " human" : ""}`);
-    message.hidden = position < firstVisible;
+    row.message = message;
     message.dataset.kind = kind;
     // 只有辩论发言有 #debate-id；质疑/补充的 id 可能相同，不能拿来互相跳转。
     if (kind === "debate" && Number.isSafeInteger(Number(item.id)) && Number(item.id) > 0) {
@@ -431,10 +456,10 @@ function renderTaskConversation(data, onReply = null) {
       add(bubble, respond);
     }
     add(message, avatar, header, bubble);
-    add(thread, message);
   }
+  renderOrder();
   if (!rows.length) add(thread, node("p", "暂无讨论，欢迎分享观点。", "muted conversation-empty"));
-  add(box, thread);
+  add(box, thread, more);
   return box;
 }
 

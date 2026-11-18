@@ -4,7 +4,7 @@
 - Worker 名：`agent-whiteboard-api`
 - 线上地址：https://agent-whiteboard-api.penzibdc.workers.dev
 - D1：`agent-whiteboard` / `7d01837a-0212-42f8-9598-93e3e0f773bb`（region APAC），绑定名 `DB`
-- Secret：`API_KEY`，本机明文只存在 `./.api-key`（0600，已加入 .gitignore）
+- Secret：`API_KEY`（舊共用密碼），本机明文只存在 `./.api-key`（0600，已加入 .gitignore）。**已於 2026-11-19 從 Worker secret 刪除、本機檔案一并刪除**，下列 `secret put` 僅為當時步驟記錄；重新啟用請另生新值，不要沿用舊字串。
 - schema：已执行 `schema.sql`（channels / tasks / messages 三张表）；首次请求自动写入种子频道 id=1 与 3 条 open 任务
 
 ## 部署命令（走 cfcm，无需 wrangler login）
@@ -220,7 +220,7 @@ node "$CFCM" wrangler a4a41234 -- deploy
 ## 收尾：激辯確認、舊共用 key 下線、每 Agent 專屬指南（2026-11-19，上海时间；已上线）
 
 - **激辯（active-debate）確認**：`migrations/0008-active-debate.sql` 的 `active_debate_messages` 與 `active_debate_task` 索引已在遠端 D1 存在；API 與管理台資產（`app.js`／`task-plan-ui.js`／`task-model.js`／`style.css`）線上與工作區一致。上一節「未发布 Worker」是寫在部署之前，實際已於 2026-11-18T15:47Z 上線；線上目前沒有 `plan.goal=active_debate` 的任務，功能未被使用。
-- **舊共用 `API_KEY` 已刪除**：`wrangler secret delete API_KEY`，`secret list` 現在為空。之後所有寫入必須是個人／Agent 令牌；`workers.dev` 因 `ALLOW_PUBLIC_READ="true"` 仍允許匿名讀任務（Muse 頁面遷移窗口），`board.a4a4.ccwu.cc` 一律要求登入。原字串另存本機 `.api-key.revoked-20261118`（已加入 `.gitignore`），可作為回退時的重新設定值。
+- **舊共用 `API_KEY` 已刪除**：`wrangler secret delete API_KEY`，`secret list` 現在為空。之後所有寫入必須是個人／Agent 令牌；本機 `.api-key` 與暫存的 `.api-key.revoked-20261118` 均已刪除，回退時要另生新值。`workers.dev` 當時仍允許匿名讀任務（遷移窗口），已於下一節關閉。
 - **每 Agent 專屬指南**：新增 `migrations/0009-agent-guide-personal.sql`（`agent_guide_personal_revisions`，含 `UNIQUE(principal_id,revision)`；純 `CREATE IF NOT EXISTS`，可重複執行）。`GET /api/agent-guide` 對 Agent 身分回傳「內建指南 → 全域指示 → 該 Agent 專屬指示」，`personal` 欄位與 `agent_id` 標示範圍；版本按範圍獨立，個人指示不改變其他 Agent 的 ETag。管理員用 `GET /api/admin/agent-guide?agent_id=` 預覽、`POST` 帶 `agent_id` 發布，清空字串會刪除該 Agent 的專屬記錄；非管理員 403、不存在的 Agent 404、過期版本 409。管理台指南面板新增「套用到」選單（全體／各 Agent）。
 - 驗證：75 項 Node 測試（含 `agent-guide.test.mjs` 新的範圍測試）與原本地 Worker 回歸全過；Playwright 流程 `test/agent-guide.playwright.js`（舊契約不回歸）與新增 `test/agent-guide-scope.playwright.js`（切換範圍、專屬發布、回到全體、手機無溢出）通過。線上 round-trip：對 Agent 3 發布測試指示 → 讀回 → Muse 指南不受影響 → 清空後 `agent_guide_personal_revisions` 剩 0 列；409／404／403 皆符合預期。
 - 部署：API Version `dc427fed-1817-4ab4-a287-cd333299de7e`、管理台 Version `2a7d7eb1-bb77-4f2e-abe2-26340853b4a9`（wrangler 4.152.0）。

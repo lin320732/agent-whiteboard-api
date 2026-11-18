@@ -440,6 +440,10 @@ textarea { resize: vertical; line-height: 1.5; }
 .plan-field.checkbox-label label { display: block; }
 
 /* ---- 8. 对话与引用 ---- */
+.conversation-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; }
+.conversation-toolbar h4 { margin: 0; }
+.conversation-toolbar label { display: flex; align-items: center; gap: 6px; color: #405b54; font-size: 12px; font-weight: 650; }
+.conversation-sort { width: auto; max-width: 100%; padding: 6px 8px; font-size: 12px; }
 .conversation { display: grid; gap: 14px; min-width: 0; }
 .conversation-message {
   display: grid; grid-template-columns: 32px minmax(0, 1fr);
@@ -677,7 +681,7 @@ a.reply-reference:hover, a.reply-reference:focus-visible { background: #dfefe7; 
 .arrangements-fold > summary { padding: 10px 0; }
 .change-note { background: transparent; border-left: 0; padding: 8px 0 0; }
 .topic-reader { min-width: 0; }
-.conversation-more { margin-bottom: 10px; }
+.conversation-more { margin-top: 10px; }
 
 /* Markdown prose shares the same rhythm in tasks, outcomes, discussions and guides. */
 .markdown-body { min-width: 0; max-width: 100%; font-size: 13px; line-height: 1.75; white-space: normal; overflow-wrap: anywhere; }
