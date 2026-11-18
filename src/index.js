@@ -367,16 +367,19 @@ function gateError(readiness) {
 }
 
 // 讀一條任務的全部上下文（任務、質疑、補充、辯論、參與事件、強制通過記錄）
-async function loadTaskContext(env, useDb, id) {
+async function loadTaskContext(env, useDb, id, knownTask = null) {
   if (useDb) {
-    const [tasks,challenges,supplements,debate,ev,forceApprovals] = await readBatch(env.DB,[
-      ['SELECT * FROM tasks WHERE id=?',id],
+    const queries = [
+      ...(!knownTask ? [['SELECT * FROM tasks WHERE id=?',id]] : []),
       ['SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC',id],
       ['SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC',id],
       ['SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC',id],
       ["SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')",id],
-      ['SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC',id],
-    ]);
+      ...(!knownTask ? [['SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC',id]] : []),
+    ];
+    const rows = await readBatch(env.DB, queries);
+    const tasks = knownTask ? [knownTask] : rows.shift();
+    const [challenges,supplements,debate,ev,forceApprovals=[]] = rows;
     const task=tasks[0];
     if (!task) return null;
     return { task, challenges, supplements, debate, eventAgents: ev.map(r => r.agent), forceApprovals };
@@ -432,7 +435,12 @@ const CORE_SCHEMA = `CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY
   CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, type TEXT NOT NULL, task_id INTEGER, points INTEGER NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS force_approvals (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT);
   CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);
-  CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';`;
+  CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';
+  CREATE INDEX IF NOT EXISTS challenges_task ON challenges(task_id);
+  CREATE INDEX IF NOT EXISTS supplements_task ON supplements(task_id);
+  CREATE INDEX IF NOT EXISTS events_task_type_agent ON events(task_id, type, agent);
+  CREATE INDEX IF NOT EXISTS debate_messages_task ON debate_messages(task_id);
+  CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id);`;
 // Derive the probe from the same DDL as migrations, so new tables cannot be skipped.
 const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, ACTIVE_DEBATE_SCHEMA].join('\n')
   .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)]
@@ -683,14 +691,16 @@ const businessWorker = {
         let sql = "SELECT * FROM tasks WHERE 1=1", args = [];
         if (status) { sql += " AND status=?"; args.push(status); }
         if (channelId) { sql += " AND channel_id=?"; args.push(Number(channelId)); }
+        if (needs === "agent") sql += " AND status IN ('open','in_progress','review')";
         sql += " ORDER BY id DESC";
         const r = await env.DB.prepare(sql).bind(...args).all();
+        const people = r.results.length ? await env.DB.prepare(`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`).all() : null;
         // Bound concurrency to three task contexts; each context batches its D1 reads.
         for (let offset=0; offset<r.results.length; offset+=3) {
           await Promise.all(r.results.slice(offset,offset+3).map(async t => {
-            const ctx = await loadTaskContext(env, true, t.id);
+            const ctx = await loadTaskContext(env, true, t.id, t);
             const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx),principal);
+            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx),principal,people.results);
             t.verify_readiness = enriched.readiness;
             t.collaboration = enriched.collaboration;
             t.host = enriched.workflow.host;
@@ -708,6 +718,7 @@ const businessWorker = {
       let list = [...mem.tasks].reverse();
       if (status) list = list.filter(t => t.status === status);
       if (channelId) list = list.filter(t => t.channel_id === Number(channelId));
+      if (needs === "agent") list = list.filter(t => ['open','in_progress','review'].includes(t.status));
       for (const t of list) {
         const ctx = await loadTaskContext(env, false, t.id);
         const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);

@@ -49,20 +49,23 @@ export async function sourceRef(db, taskId, ref) {
   if(row.agent) {const matches=await all(db,'SELECT id FROM principals WHERE name=?',row.agent);if(matches.length===1) authorId=matches[0].id;}
   return {kind:ref.kind,id:row.id,author_id:authorId};
 }
-export async function workflowContext(db, task) {
+export async function workflowContext(db, task, sharedPeople = null) {
   await syncIssues(db,task.id);
-  const [profiles,issues,subtasks,outcomes,people,subtaskEvents,contributors,reviews,deliveries,periods]=await readBatch(db,[
+  const queries=[
     ['SELECT * FROM task_workflows WHERE task_id=?',task.id],
     ['SELECT * FROM work_issues WHERE task_id=? ORDER BY id',task.id],
     ['SELECT * FROM work_subtasks WHERE task_id=? ORDER BY id',task.id],
     ['SELECT * FROM work_outcomes WHERE task_id=? ORDER BY id DESC',task.id],
-    [`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`],
+    ...(!sharedPeople ? [[`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`]] : []),
     ['SELECT * FROM work_subtask_events WHERE task_id=? ORDER BY id',task.id],
     [`SELECT DISTINCT p.id FROM supplements s JOIN principals p ON p.name=s.agent WHERE s.task_id=?`,task.id],
     [`SELECT r.*,COALESCE(l.display_name,p.name) AS reviewer FROM work_reviews r JOIN principals p ON p.id=r.reviewer_id LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE r.task_id=? ORDER BY r.id DESC`,task.id],
     ['SELECT * FROM work_deliveries WHERE task_id=?',task.id],
     ['SELECT * FROM task_recurrences WHERE previous_task_id=? OR next_task_id=?',task.id,task.id],
-  ]);
+  ];
+  const [profiles,issues,subtasks,outcomes,...remaining]=await readBatch(db,queries);
+  const people=sharedPeople||remaining.shift();
+  const [subtaskEvents,contributors,reviews,deliveries,periods]=remaining;
   const profile=profiles[0]||null;
   const plan=await readPlan(db,task,profile),scheduled=scheduleState(plan);
   const discussion=isActiveDebate(plan)?await discussionContext(db,task,plan,people):null;
@@ -79,8 +82,8 @@ export async function workflowContext(db, task) {
   const waiting=!discussion&&!!profile?.resume_at&&Date.parse(profile.resume_at)>Date.now();
   return {enabled:!!profile||plan.configured,plan,scheduled,...(discussion?{discussion}:{}),waiting:waiting||!scheduled.ready,resume_at:waiting?profile.resume_at:scheduled.resume_at,wait_reason:waiting?profile.wait_reason:scheduled.reason,host_id:profile?.host_id||null,host:names.get(profile?.host_id)||'',report_author_id:plan.delivery.author_id,report_author:names.get(plan.delivery.author_id)||'',acceptance:plan.acceptance.criteria,min_sources:plan.acceptance.min_sources,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length,previous_task_id:periods.find(p=>p.next_task_id===task.id)?.previous_task_id||null,next_task_id:periods.find(p=>p.previous_task_id===task.id)?.next_task_id||null};
 }
-export async function decorateCollaboration(db, task, context, readiness, collaboration, principal=null) {
-  const work=await workflowContext(db,task);
+export async function decorateCollaboration(db, task, context, readiness, collaboration, principal=null, people=null) {
+  const work=await workflowContext(db,task,people);
   const check=(key,label,met,detail)=>({key,label,met,detail});
   if(work.discussion) {
     const d=work.discussion,summary=d.has_summary?work.outcomes[0]?.summary||'':'';
@@ -134,9 +137,10 @@ export async function decorateCollaboration(db, task, context, readiness, collab
 
 async function inbox(db,p) {
   const tasks=await all(db,"SELECT * FROM tasks WHERE status NOT IN ('done','closed','proposed') ORDER BY id DESC");
+  const people=tasks.length?await all(db,`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`):null;
   const items=[], waiting=[];
   for(const t of tasks) {
-    const w=await workflowContext(db,t);
+    const w=await workflowContext(db,t,people);
     const missingReport=w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report;
     const base={task_id:t.id,title:t.title};
     if(w.discussion) {

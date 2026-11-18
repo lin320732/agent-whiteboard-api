@@ -6,14 +6,19 @@ async page => {
   const json = data => ({status: 200, contentType: 'application/json', body: JSON.stringify(data)});
   const prose = '**重点明确**，保留适用条件。\n\n- 核实价格\n  - 检查续费\n\n> 引用官方说明，运行 `npm test`。';
   const summary = [
-    '## 结论', '', '**方案 A 更合适**，当前比较已经核实首年价格，仍需保留续费条件。', '',
+    '## 结论', '', '**方案 A 更合适** :thumbsup:，当前比较已经核实首年价格，仍需保留续费条件。😀', '',
     '| 方案 | 首年 | 续费 | 币种 | 使用条件 | 备注 |', '| :--- | ---: | ---: | :---: | --- | --- |',
     '| A | 20 | 30 | CNY | 单人 | 待核对 |', '| B | 25 | 35 | CNY | 多人 | 已核对 |', '',
     prose, '', '```json', JSON.stringify({command: 'a'.repeat(180)}), '```', '',
     '[官方价格](https://example.com/pricing_(2026))。 https://example.com/docs.', '',
     '<img src=x onerror="window.markdownExecuted=true">', '',
     '<script>window.markdownExecuted=true</script>', '',
-    '[危险链接](javascript:alert(1))', '', '![图表](https://example.com/chart.png)',
+    '[危险链接](javascript:alert(1))', '', '- [ ] 核对图表', '- [x] 记录结论', '',
+    '![图表](https://media.example.test/chart.svg)', '',
+    '![audio: 讨论录音](https://media.example.test/talk.mp3)', '',
+    '![video: 操作演示](https://media.example.test/demo.mp4)',
+    '', '[YouTube 讲解](https://www.youtube.com/watch?v=7cjVj1ZyzyE)',
+    '', '[B 站演示](https://www.bilibili.com/video/BV1B7411m7LV?p=2)',
   ].join('\n');
   const plan = {goal: 'content', collaboration: 'hosted', configured: true, revision: 1, acceptance: {criteria: '可读，内容准确', min_sources: 0, independent_review: false, opposing_views: false}, schedule: {kind: 'once'}, delivery: {format: 'text'}};
   const task = {id: 1, title: 'Markdown 成果示例', status: 'review', detail: '## 任务目标\n\n整理 **价格比较**，保留 `CNY` 单位。', created_by: 'Owner', plan};
@@ -31,7 +36,11 @@ async page => {
   await page.route('**/*', async route => {
     if (route.request().resourceType() !== 'document') return route.continue();
     const response = await route.fetch();
-    return route.fulfill({response, headers: {...response.headers(), 'content-security-policy': "default-src 'none'; base-uri 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"}});
+    return route.fulfill({response, headers: {...response.headers(), 'content-security-policy': "default-src 'none'; base-uri 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: https:; media-src 'self' https:; frame-src https://www.youtube-nocookie.com https://player.bilibili.com", 'referrer-policy': 'no-referrer'}});
+  });
+  await page.route('https://media.example.test/**', route => {
+    if (route.request().url().endsWith('/chart.svg')) return route.fulfill({status: 200, contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="900" height="450"><rect width="900" height="450" fill="#a8c7b3"/></svg>'});
+    return route.fulfill({status: 200, body: ''});
   });
   await page.route('**/api/**', async route => {
     const request = route.request(), path = request.url().replace(/^https?:\/\/[^/]+/, '').split('?')[0];
@@ -46,9 +55,16 @@ async page => {
     if (path === '/api/agent-guide') return route.fulfill(json(guide()));
     if (path === '/api/messages') return route.fulfill(json({messages: [{author: 'Worker', text: '**频道进展**\n\n- 已核对价格'}]}));
     if (path === '/api/topics') return route.fulfill(json({themes: [], topics: [{id: 1, title: '排版讨论', author: 'Host', replies: 1}]}));
-    if (path === '/api/topics/1') return route.fulfill(json({topic: {id: 1, title: '排版讨论', author: 'Host', content: '**话题结论**'}, replies: [{id: 1, author: 'Worker', content: '*回复说明*'}], proposals: []}));
+    if (path === '/api/topics/1') return route.fulfill(json({topic: {id: 1, title: '排版讨论', author: 'Host', content: '**话题结论** :tada:'}, replies: [{id: 1, author: 'Worker', content: '*回复说明*'}], proposals: []}));
     return route.fulfill(json({channels: [], accounts: [], agents: [], leaderboard: [], highlights: [], decisions: [], items: [], waiting: [], contributions: []}));
   });
+  const embedRequests = [];
+  for (const host of ['www.youtube-nocookie.com', 'player.bilibili.com']) {
+    await page.route(`https://${host}/**`, route => {
+      embedRequests.push({url: route.request().url(), referer: route.request().headers().referer});
+      return route.fulfill({status: 200, contentType: 'text/html', body: '<!doctype html><title>模拟视频播放器</title>'});
+    });
+  }
   await page.goto('http://127.0.0.1:8765/');
   await page.locator('#navTasks').click();
   await page.locator('#taskList .task-item').click();
@@ -61,9 +77,32 @@ async page => {
   if ((await block.locator('.text-preview').first().textContent()).includes('**')) throw Error('摘要截断留下 Markdown 标记');
   await fold.locator(':scope > summary').click();
   const full = fold.locator('.full-text');
-  for (const selector of ['h2', 'strong', 'ul ul', 'blockquote', 'pre code.language-json', '.markdown-table table', 'code']) if (!await full.locator(selector).count()) throw Error(`正文缺少 ${selector}`);
+  for (const selector of ['h2', 'strong', 'ul ul', 'blockquote', 'pre code.language-json', '.markdown-table table', 'code', '.markdown-task-item input[disabled]', '.markdown-image img', '.markdown-audio audio[controls]', '.markdown-video video[controls]']) if (!await full.locator(selector).count()) throw Error(`正文缺少 ${selector}`);
+  if (!(await full.textContent()).includes('👍') || !(await full.textContent()).includes('😀')) throw Error('成果中的 Emoji 没有显示');
   if (await full.locator('td.markdown-align-right').first().evaluate(cell => getComputedStyle(cell).textAlign) !== 'right') throw Error('CSP 下表格对齐失效');
-  if (await full.locator('script, img, svg, [style], [onerror], a[href^="javascript:"]').count() || await page.evaluate(() => !!window.markdownExecuted)) throw Error('不可信 Markdown 被执行');
+  const image = full.locator('.markdown-image img');
+  await image.scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => document.querySelector('#detailPanel-outcome .full-text .markdown-image img')?.naturalWidth === 900);
+  if (await full.locator('script, svg, [style], [onerror], a[href^="javascript:"]').count() || await page.evaluate(() => !!window.markdownExecuted)) throw Error('不可信 Markdown 被执行');
+  if (await full.locator('img').count() !== 1 || await image.getAttribute('alt') !== '图表') throw Error('图片未按安全语法显示');
+  if (await full.locator('.markdown-audio audio').getAttribute('preload') !== 'none' || await full.locator('.markdown-video video').getAttribute('preload') !== 'none') throw Error('音视频没有按需加载');
+  if (!await full.locator('.markdown-task-item input[checked][disabled]').count()) throw Error('待办勾选框没有显示');
+  const embeds = full.locator('.markdown-video-embed');
+  if (await embeds.count() !== 2 || await embeds.locator('iframe').count() || embedRequests.length) throw Error('视频播放器在展开前请求了第三方');
+  const youtubeRequest = page.waitForRequest(request => request.url().startsWith('https://www.youtube-nocookie.com/embed/'));
+  await embeds.first().locator('summary').click();
+  const youtubeFrameRequest = await youtubeRequest;
+  if (!youtubeFrameRequest.headers().referer?.startsWith('http://127.0.0.1:8765/')) throw Error('YouTube 播放器缺少站点来源');
+  if (!await embeds.first().locator('iframe').count()) throw Error('YouTube 播放器没有展开');
+  await embeds.first().locator('summary').click();
+  await embeds.first().locator('iframe').waitFor({state: 'detached'});
+  const bilibiliRequest = page.waitForRequest(request => request.url().startsWith('https://player.bilibili.com/player.html'));
+  await embeds.last().locator('summary').click();
+  await bilibiliRequest;
+  if (!await embeds.last().locator('iframe').count()) throw Error('B 站播放器没有展开');
+  await fold.locator(':scope > summary').click();
+  await embeds.last().locator('iframe').waitFor({state: 'detached'});
+  await fold.locator(':scope > summary').click();
   const named = full.getByRole('link', {name: '官方价格', exact: true});
   if (await named.getAttribute('href') !== 'https://example.com/pricing_(2026)' || await named.getAttribute('rel') !== 'noopener noreferrer') throw Error('命名链接丢失或缺少安全属性');
   if (await page.locator('#taskDetail .outcome-form textarea[name="summary"]').inputValue() !== summary) throw Error('编辑器没有保留 Markdown 原文');
@@ -81,6 +120,7 @@ async page => {
   await page.locator('#topicList button').click();
   await page.locator('#topicDetail .markdown-body strong').waitFor();
   if (!await page.locator('#topic-reply-1 em').count() || !await page.locator('#messages .markdown-body strong').count()) throw Error('话题回复或频道消息没有排版');
+  if (!(await page.locator('#topicDetail .markdown-body').first().textContent()).includes('🎉')) throw Error('话题中的 Emoji 没有显示');
 
   await page.locator('#workspaceMenu > summary').click();
   await page.locator('#workspaceMenu [data-settings="guide"]').click();
@@ -105,8 +145,14 @@ async page => {
     if (!await region.evaluate(element => element.scrollWidth > element.clientWidth && getComputedStyle(element).overflowX === 'auto')) throw Error(`手机上 ${selector} 没有独立滚动`);
     if (!await region.evaluate(element => {element.scrollLeft = 40; return element.scrollLeft > 0;})) throw Error(`手机上 ${selector} 无法横向滚动`);
   }
+  for (const selector of ['.markdown-image img', '.markdown-audio audio', '.markdown-video video']) {
+    if (!await mobile.locator(selector).evaluate(element => element.getBoundingClientRect().right <= innerWidth + 1)) throw Error(`手机上 ${selector} 横向溢出`);
+  }
+  const mobileEmbed = mobile.locator('.markdown-video-embed').last();
+  await mobileEmbed.locator('summary').click();
+  if (!await mobileEmbed.evaluate(element => element.getBoundingClientRect().right <= innerWidth + 1)) throw Error('手机上外链播放器横向溢出');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error('Markdown 导致手机页面横向溢出');
   await page.screenshot({path: '.playwright-cli/markdown-mobile.png', fullPage: true});
   if (errors.length) throw Error(errors.join('\n'));
-  return {task: true, outcome: true, discussion: true, community: true, guide: true, rawEditing: true, safeHTML: true, csp: true, mobile: true};
+  return {task: true, outcome: true, discussion: true, community: true, guide: true, media: true, platformVideo: true, checklists: true, rawEditing: true, safeHTML: true, csp: true, mobile: true};
 }

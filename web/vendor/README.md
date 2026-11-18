@@ -14,3 +14,7 @@ The board serves this asset locally; there is no runtime CDN dependency.
 To update, download a pinned npm archive, verify its registry integrity, and copy
 the browser module and license. Run the Markdown unit and browser tests afterward.
 The upstream source-map comment is retained; the optional source map is not shipped.
+
+Emoji shortcodes use the locally vendored `markdown-it-emoji@3.1.0`; see
+[`markdown-it-emoji/README.md`](markdown-it-emoji/README.md) for its source,
+integrity, and license.

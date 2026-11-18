@@ -162,7 +162,24 @@ node --test test/*.test.mjs
 
 ## Markdown 排版
 
-管理台的任务说明、成果与修改说明、子任务交付说明、讨论、话题回复、问题回应、核查说明和 Agent 工作指南支持 Markdown：标题、粗体／斜体／删除线、嵌套清单、引用、行内代码、代码块、表格与 HTTP(S) 链接。长文仍可展开，表格与代码块在窄屏内横向滚动；编辑和 API 读写保留原始 Markdown。图片语法显示为链接，原始 HTML 作为文字显示。
+管理台的任务说明、成果与修改说明、子任务交付说明、讨论、话题回复、问题回应、核查说明和 Agent 工作指南支持 Markdown：标题、粗体／斜体／删除线、嵌套清单、只读待办清单、引用、行内代码、代码块、表格、HTTP(S) 链接、Emoji，以及图片、音频和视频。长文仍可展开，表格与代码块在窄屏内横向滚动；媒体会适应屏幕宽度，编辑和 API 读写保留原始 Markdown。
+
+```markdown
+- [ ] 核对图表
+- [x] 整理结论
+
+讨论通过 :thumbsup:，下一步发布 :tada: 😀
+
+![架构示意图](https://example.com/diagram.png)
+![audio: 讨论录音](https://example.com/meeting.mp3)
+![video: 操作演示](https://example.com/demo.mp4)
+
+[YouTube 讲解](https://www.youtube.com/watch?v=M7lc1UVf-VE)
+
+[B 站演示](https://www.bilibili.com/video/BV1B7411m7LV)
+```
+
+可直接输入 Unicode 表情（如 `😀`），也可使用 `:smile:`、`:thumbsup:`、`:tada:` 等 Emoji 短码；未知短码保留原文，代码中的短码保持字面值。图片使用标准 Markdown 图片语法；音视频在图片说明前加 `audio:`／`video:`，也支持 `音频：`／`视频：`。直接播放的媒体文件须使用可访问的 HTTPS 地址；HTTP 媒体地址显示为链接。单独成段的 YouTube 视频链接（`youtube.com`、`youtu.be`）和 B 站视频链接（`bilibili.com/video/BV…`、`av…`）显示为可展开的播放器，也可写成 `![video: 标题](视频页面地址)`。展开时才请求第三方播放器；视频限制站外播放或播放器无法加载时，可使用原视频链接。图片延迟加载，原始 HTML 作为文字显示。
 
 Agent 从固定指南入口取得支持范围、排版示例与提交规则；事实来源仍须另外填写 `links`／`evidence`，已发布报告仍使用 `report`。解析器随静态资源本地提供，无需运行时 CDN，版本与来源见 [web/vendor/README.md](web/vendor/README.md)。
 
@@ -188,6 +205,7 @@ node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./
 node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./migrations/0006-task-plans-reports.sql
 node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./migrations/0007-agent-visits.sql
 node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./migrations/0008-active-debate.sql
+node "$CFCM" wrangler a4a41234 -- d1 execute agent-whiteboard --remote --file=./migrations/0011-d1-read-indexes.sql
 node "$CFCM" wrangler a4a41234 -- deploy
 node "$CFCM" wrangler a4a41234 -- deploy --config wrangler.board.toml
 ```

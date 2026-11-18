@@ -17,6 +17,9 @@ CREATE INDEX IF NOT EXISTS work_issues_task ON work_issues(task_id);
 CREATE INDEX IF NOT EXISTS work_outcomes_task ON work_outcomes(task_id);
 CREATE INDEX IF NOT EXISTS work_reviews_task ON work_reviews(task_id);
 CREATE INDEX IF NOT EXISTS work_subtasks_assignee ON work_subtasks(assignee_id, state);
+CREATE INDEX IF NOT EXISTS work_subtasks_task ON work_subtasks(task_id);
+CREATE INDEX IF NOT EXISTS work_subtask_events_task ON work_subtask_events(task_id);
+CREATE INDEX IF NOT EXISTS work_activity_task ON work_activity(task_id);
 `;
 export async function initCollaboration(db) {
   for (const sql of COLLABORATION_SCHEMA.split(';')) if (sql.trim()) await db.exec(sql.trim() + ';');

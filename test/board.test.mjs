@@ -26,6 +26,9 @@ test("board static content is served with script protections", async () => {
   const res = await board.fetch(new Request("https://board.example.test/"), env);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("Content-Security-Policy"), /script-src 'self'/);
+  assert.match(res.headers.get("Content-Security-Policy"), /img-src 'self' data: https:/);
+  assert.match(res.headers.get("Content-Security-Policy"), /media-src 'self' https:/);
+  assert.match(res.headers.get("Content-Security-Policy"), /frame-src https:\/\/www.youtube-nocookie.com https:\/\/player.bilibili.com/);
   assert.equal(res.headers.get("X-Content-Type-Options"), "nosniff");
   assert.equal(res.headers.get("Cache-Control"), "no-store");
 });

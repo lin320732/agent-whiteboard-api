@@ -12,6 +12,21 @@ export function createReadingUI({node}) {
     const box = node('div', null, `markdown-body ${className}`.trim());
     // The shared parser disables raw HTML and validates every link protocol.
     box.innerHTML = renderMarkdown(value);
+    for (const embed of box.querySelectorAll('.markdown-video-embed')) {
+      embed.addEventListener('toggle', () => {
+        const slot = embed.querySelector('.markdown-video-frame');
+        if (!embed.open) { slot.replaceChildren(); return; }
+        if (slot.firstChild) return;
+        const iframe = document.createElement('iframe');
+        iframe.src = embed.dataset.embedSrc;
+        iframe.title = embed.querySelector('summary').textContent.trim();
+        iframe.loading = 'lazy';
+        iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+        iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+        iframe.allowFullscreen = true;
+        slot.append(iframe);
+      });
+    }
     return box;
   }
   function sources(value, {label = '来源', exclude = []} = {}) {
@@ -46,6 +61,7 @@ export function createReadingUI({node}) {
     fold.addEventListener('toggle', () => {
       preview.hidden = fold.open;
       summary.textContent = fold.open ? '收起全文' : '展开全文';
+      if (!fold.open) for (const embed of full.querySelectorAll('.markdown-video-embed[open]')) embed.open = false;
     });
     box.append(preview, fold);
     return box;

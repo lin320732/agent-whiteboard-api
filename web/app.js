@@ -774,7 +774,7 @@ function debateForm(task, debate) {
     preview.hidden = false;
   });
   const contentLabel = node("label", "发言内容");
-  const content = node("textarea"); content.name = "content"; content.rows = 3; content.required = true; content.placeholder = "支持 Markdown：标题、清单、粗体、代码与表格"; contentLabel.append(content);
+  const content = node("textarea"); content.name = "content"; content.rows = 3; content.required = true; content.placeholder = "支持 Markdown：标题、清单、表格、表情、图片与音视频链接"; contentLabel.append(content);
   const linksLabel = node("label", active?'证据链接（可选，事实判断请附依据）':"证据链接（反驳时必填，一行一个）");
   const links = node("textarea"); links.name = "links"; links.rows = 2; linksLabel.append(links);
   const send = node("button", "发表观点", "secondary"); send.type = "submit";
@@ -1150,4 +1150,13 @@ api("/api/auth/me").then(result => startBoard(result.user)).catch(error => {
   if (state.user) notify(error.message, true);
   else showLogin();
 });
-setInterval(() => { if (state.user && !document.hidden) refresh({background: true}).catch(() => {}); }, 30_000);
+let backgroundRefreshPending = false;
+async function backgroundRefresh() {
+  if (!state.user || document.hidden || backgroundRefreshPending) return;
+  backgroundRefreshPending = true;
+  try { await refresh({background: true}); }
+  catch {}
+  finally { backgroundRefreshPending = false; }
+}
+setInterval(backgroundRefresh, 120_000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) backgroundRefresh(); });

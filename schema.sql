@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS debate_messages (
 
 -- 首次以非认领者身分回覆已认领任务，每任务每 Agent 只记一次；避免重复刷分。
 CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';
+CREATE INDEX IF NOT EXISTS challenges_task ON challenges(task_id);
+CREATE INDEX IF NOT EXISTS supplements_task ON supplements(task_id);
+CREATE INDEX IF NOT EXISTS events_task_type_agent ON events(task_id, type, agent);
+CREATE INDEX IF NOT EXISTS debate_messages_task ON debate_messages(task_id);
+CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id);
 
 -- 手工账号、个人令牌与网页登录会话。令牌原文绝不存入 D1。
 CREATE TABLE IF NOT EXISTS principals (
