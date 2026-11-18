@@ -225,3 +225,10 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 驗證：75 項 Node 測試（含 `agent-guide.test.mjs` 新的範圍測試）與原本地 Worker 回歸全過；Playwright 流程 `test/agent-guide.playwright.js`（舊契約不回歸）與新增 `test/agent-guide-scope.playwright.js`（切換範圍、專屬發布、回到全體、手機無溢出）通過。線上 round-trip：對 Agent 3 發布測試指示 → 讀回 → Muse 指南不受影響 → 清空後 `agent_guide_personal_revisions` 剩 0 列；409／404／403 皆符合預期。
 - 部署：API Version `dc427fed-1817-4ab4-a287-cd333299de7e`、管理台 Version `2a7d7eb1-bb77-4f2e-abe2-26340853b4a9`（wrangler 4.152.0）。
 - 未做：未改任何 Agent 的實際專屬指示（測試內容已清除）、未改任務狀態、未動管理員線上指示。
+
+## 提交与复部署（2026-11-19，上海时间）
+
+- 提交 `c14c44e`（作者沿用仓库配置 `lin320732`）收拢整个工作区：多 Agent 接入（旧 key 只读、每 Agent 专属指南、指南去 Muse 化）与另一条工作线的激辩／协作界面交付。两者在 `src/index.js` 与管理台资产上重叠，无法切成可独立构建的中间提交，提交信息内已分列。
+- 从提交后的工作区重新部署两个 Worker，取代上一节的 `dc427fed`／`2a7d7eb1`：API `0002fca5-bfd2-458a-b511-baa0b9d9d76b`、管理台 `57180621-ad92-4f1d-a518-249ac8a5de5b`（wrangler 4.152.0）。
+- 一致性核对：`board.a4a4.ccwu.cc` 的 `app.js`／`agent-guide.js`／`task-model.js`／`style.css`／`markdown.js`／`index.html` 与工作区逐字节相同；API 指南正文与 `docs/AGENT_LOOP.md` 完全相同（版本 `1083fc52ed42`）。
+- 线上状态：`/api/health` 200；`muse_token` 读指南 200；旧共用 key 读 inbox 401、写 claim 401；匿名 `/api/admin/agents` 401；匿名 `/api/tasks` 仍 200（`ALLOW_PUBLIC_READ` 迁移窗口未关闭）。
