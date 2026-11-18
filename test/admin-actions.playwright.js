@@ -41,14 +41,17 @@ async page => {
     return route.fulfill(json({ error: `unmocked ${path}` }, 404));
   });
   await page.goto("http://127.0.0.1:8765/");
+  await page.locator('#workspaceMenu > summary').click();
+  await page.locator('#accountsMenu').click();
   const agent = page.locator("#agents .account-item").first();
   await page.locator("#agents .account-row").first().waitFor();
   await agent.getByRole("button", { name: "改名" }).click({ timeout: 2500 });
   const edit = agent.locator(".account-edit");
   if (await edit.locator('input[name="name"]').inputValue() !== "新 Muse") throw Error("改名表单没有预填现有名称");
   await edit.locator('input[name="name"]').fill("取消的名称");
-  await page.getByRole("button", { name: "刷新数据" }).click();
-  await page.locator("#channelList").getByText("频道 2").waitFor();
+  await page.locator('#refresh').click();
+  // 频道快捷筛选在「任务」视图里；这里用文字更新判断刷新已完成，不去切换视图。
+  await page.waitForFunction(() => document.querySelector("#channelList")?.textContent.includes("频道 2"));
   await page.waitForTimeout(100);
   if (await edit.locator('input[name="name"]').inputValue() !== "取消的名称") throw Error("刷新清掉了尚未保存的名称");
   await edit.getByRole("button", { name: "取消" }).click();
@@ -65,8 +68,8 @@ async page => {
   if (!await agent.locator(".account-confirm").isVisible()) throw Error("轮换未在账号旁显示确认操作");
   if (rotateCalls !== 0) throw Error("尚未确认就轮换了令牌");
   const nextRefresh = channelReads + 1;
-  await page.getByRole("button", { name: "刷新数据" }).click();
-  await page.locator("#channelList").getByText(`频道 ${nextRefresh}`).waitFor();
+  await page.locator('#refresh').click();
+  await page.waitForFunction(expected => document.querySelector("#channelList")?.textContent.includes(expected), `频道 ${nextRefresh}`);
   await page.waitForTimeout(100);
   if (!await agent.locator(".account-confirm").isVisible()) throw Error("刷新数据时清掉了尚未确认的操作");
   await agent.getByRole("button", { name: "取消" }).click();

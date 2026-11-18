@@ -1,4 +1,5 @@
 import { originAllowed, permit } from './auth.js';
+import { isActiveDebate } from './active-debate.js';
 import { newPlan, planInsert, validatePlanAgents, legacyType } from './task-plan.js';
 import { WorkError,fail,answer,all,first,run,now,text,id,links,admin,agent,hostAllowed,requireTask,writable,workflowContext,sourceRef,audit } from './collaboration.js';
 
@@ -57,8 +58,9 @@ export async function communityRoute(request,env,p,path) {
       if(action==='propose') {
         if(await first(db,'SELECT task_id FROM community_proposals WHERE topic_id=? AND author_id=?',topicId,p.id)) fail('你已从这个话题提交提案',409);
         const title=text(b.title,200),detail=text(b.detail,4000),expected=text(b.expected,2000),value=text(b.value,2000),type=b.type||'research';
-        if(!['research','data','creative','debate'].includes(type)) fail('无效任务类型');
+        if(!['research','data','creative','debate','active_debate'].includes(type)) fail('无效任务类型');
         const plan=newPlan(b.plan||{},type);
+        if(b.type&&((type==='active_debate')!==isActiveDebate(plan))) fail('激辩的 type 与 plan.goal 须一致');
         await validatePlanAgents(db,plan);
         const stamp=now();
         let result;

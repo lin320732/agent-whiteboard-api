@@ -1,5 +1,6 @@
 // Whiteboard identities are stored only in D1. Tokens are generated, displayed once,
 // and persisted solely as SHA-256 hashes. The legacy key has agent-only privileges.
+import {pruneAgentVisits, visitCutoff, readAgentVisits, VisitCursorError} from './agent-visits.js';
 export const AUTH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS principals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +65,7 @@ export async function principalFor(request, env) {
   if (header) {
     if (!header.startsWith("Bearer ") || header.length > 256) return null;
     const secret = header.slice(7);
-    if (env.API_KEY && secret === env.API_KEY) return { id: null, name: "Legacy Agent", kind: "legacy", role: "agent", via: "legacy" };
+    if (env.API_KEY && secret === env.API_KEY) return { id: null, name: "Legacy Agent", kind: "legacy", role: "agent", via: "legacy", readOnly: env.ALLOW_LEGACY_WRITE !== "true" };
     const tokenHash = await hashSecret(secret);
     const row = await env.DB.prepare(`SELECT p.id, p.username, p.name, p.kind, p.role, c.scope, l.display_name
       FROM api_credentials c JOIN principals p ON p.id=c.principal_id
@@ -87,6 +88,9 @@ export function permit(principal, action) {
   if (!principal) return false;
   if (principal.kind === "test") return true; // explicit TEST_MEMORY mode only
   if (action === "read") return true;
+  // The shared legacy key cannot attribute work to an account; it is read-only
+  // unless the deployment explicitly opts back in during a migration window.
+  if (principal.readOnly) return false;
   const admin = principal.kind === "human" && principal.role === "admin" && principal.via === "session";
   const humanWriter = principal.kind === "human" && (principal.role === "admin" || principal.role === "publisher") && (principal.via === "session" || principal.scope === "publisher");
   const agent = principal.kind === "agent" || principal.kind === "legacy";
@@ -160,12 +164,25 @@ export async function authRoute(request, env, principal, path) {
   }
   if (!path.startsWith("/api/admin/")) return null;
   if (!permit(principal, "admin") || !originAllowed(request, env, principal)) return fail("权限不足", principal ? 403 : 401);
+  const visits = path.match(/^\/api\/admin\/agents\/(\d+)\/visits$/);
+  if (visits) {
+    if (request.method !== 'GET') return fail('此接口只支持读取', 405);
+    const id = Number(visits[1]);
+    const target = await env.DB.prepare("SELECT id FROM principals WHERE id=? AND kind='agent'").bind(id).first();
+    if (!target) return fail('Agent 不存在', 404);
+    try { return reply(await readAgentVisits(env.DB, id, {before:new URL(request.url).searchParams.get('before')})); }
+    catch (error) { if (error instanceof VisitCursorError) return fail(error.message); throw error; }
+  }
   const listing = path.match(/^\/api\/admin\/(users|agents)$/);
   if (listing && request.method === "GET") {
     const kind = listing[1] === "users" ? "human" : "agent";
-    const data = await env.DB.prepare(`SELECT p.id, p.username, COALESCE(l.display_name, p.name) AS name, p.kind, p.role, p.active, p.created_at
+    const now = new Date();
+    if (kind === 'agent') await pruneAgentVisits(env.DB, now);
+    const presenceFields = kind === 'agent' ? `, (SELECT visited_at FROM agent_visits v
+      WHERE v.agent_id=p.id AND v.visited_at >= ? ORDER BY visited_at DESC, id DESC LIMIT 1) AS last_seen_at` : '';
+    const data = await env.DB.prepare(`SELECT p.id, p.username, COALESCE(l.display_name, p.name) AS name, p.kind, p.role, p.active, p.created_at${presenceFields}
       FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id
-      WHERE p.kind=? ORDER BY p.id`).bind(kind).all();
+      WHERE p.kind=? ORDER BY p.id`).bind(...(kind === 'agent' ? [visitCutoff(now), kind] : [kind])).all();
     return reply({ ok: true, accounts: data.results });
   }
   if (listing && request.method === "POST") {

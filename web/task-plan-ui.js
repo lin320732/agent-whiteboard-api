@@ -22,7 +22,7 @@ export function createPlanEditor({node,plan=null,authors=[],editing=false}) {
   const initial=displayPlan(null,plan),goals=group('任务目标');
   field(goals,'任务目标','goal','select',initial.goal,GOALS);
   field(goals,'交付形式','delivery_format','select',initial.delivery.format,{text:'文字或文件成果',web_report:'已发布的网页报告（MUSE 等）'});
-  field(goals,'主要作者（可选）','author_id','select',initial.delivery.author_id||'',{'':'由认领者或主持人负责'});
+  const authorField=field(goals,'主要作者（可选）','author_id','select',initial.delivery.author_id||'',{'':'由认领者或主持人负责'});
   const policy=group('协作验收');
   field(policy,'协作方式','collaboration','select',initial.collaboration,COLLABORATION);
   field(policy,'验收说明','criteria','textarea',initial.acceptance.criteria);
@@ -30,7 +30,7 @@ export function createPlanEditor({node,plan=null,authors=[],editing=false}) {
   field(policy,'需要独立核查','independent_review','checkbox',initial.acceptance.independent_review);
   field(policy,'需要核对正反观点','opposing_views','checkbox',initial.acceptance.opposing_views);
   policy.append(node('p','任务目标只提供默认模板；核查与来源要求可分别调整。最终由管理员确认交付。','muted'));
-  function applyDefaults() {const defaults=acceptanceTemplate(inputs.goal.value);inputs.min_sources.value=defaults.min_sources;inputs.independent_review.checked=defaults.independent_review||inputs.delivery_format.value==='web_report';inputs.opposing_views.checked=false;}
+  function applyDefaults() {const defaults=acceptanceTemplate(inputs.goal.value);inputs.min_sources.value=defaults.min_sources;inputs.independent_review.checked=defaults.independent_review||inputs.delivery_format.value==='web_report';inputs.opposing_views.checked=defaults.opposing_views;if(inputs.goal.value==='active_debate') inputs.criteria.value=defaults.criteria;}
   const defaults=node('button','套用目标默认验收','text-button');defaults.type='button';defaults.addEventListener('click',()=>{applyDefaults();dirty=false;});policy.append(defaults);
   for(const key of ['criteria','min_sources','independent_review','opposing_views']) inputs[key].addEventListener('input',()=>{dirty=true;});
   inputs.goal.addEventListener('change',()=>{if(!dirty) applyDefaults();});
@@ -39,17 +39,31 @@ export function createPlanEditor({node,plan=null,authors=[],editing=false}) {
   field(timing,'执行方式','schedule_kind','select',initial.schedule.kind,SCHEDULES);
   function localDate(value) {if(!value) return '';const d=new Date(value);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);}
   field(timing,'计划开始时间','start_at','datetime-local',localDate(initial.schedule.start_at));
+  const ending=field(timing,'激辩截止时间','end_at','datetime-local',localDate(initial.schedule.end_at));
+  const debateNote=node('p','主动提出观点，接续反驳与追问，持续讨论至截止时间。至少两位 Agent、正反观点与三轮交锋；每轮一条，冷场三十分钟主动破冰，到期总结。首版不新增积分。','muted active-debate-note');timing.append(debateNote);
   const interval=field(timing,'每隔多少天执行','interval_days','number',initial.schedule.interval_days||1);inputs.interval_days.min='1';inputs.interval_days.max='365';
   const trigger=field(timing,'触发条件','event','textarea',initial.schedule.event||'');
-  function syncTiming() {const kind=inputs.schedule_kind.value;interval.hidden=kind!=='recurring';trigger.hidden=kind!=='event';inputs.interval_days.required=kind==='recurring';inputs.event.required=kind==='event';inputs.start_at.required=kind==='recurring';}
+  function syncTiming() {const kind=inputs.schedule_kind.value,debate=inputs.goal.value==='active_debate';interval.hidden=kind!=='recurring';trigger.hidden=kind!=='event';inputs.interval_days.required=kind==='recurring';inputs.event.required=kind==='event';inputs.start_at.required=kind==='recurring';ending.hidden=!debate;debateNote.hidden=!debate;inputs.end_at.required=debate;}
   inputs.schedule_kind.addEventListener('change',syncTiming);syncTiming();
+  function syncDebate(changed=false) {
+    const debate=inputs.goal.value==='active_debate';
+    authorField.querySelector('label').textContent=debate?'截止总结作者（可选）':'主要作者（可选）';
+    if(inputs.author_id.options[0]) inputs.author_id.options[0].text=debate?'首位参与的可用 Agent 总结':'由认领者或主持人负责';
+    inputs.collaboration.querySelector('option[value="open"]').textContent=debate?'开放讨论，无需认领':COLLABORATION.open;
+    inputs.delivery_format.querySelector('option[value="text"]').textContent=debate?'截止文字总结':'文字或文件成果';
+    if(debate) {inputs.delivery_format.value='text';inputs.collaboration.value='open';inputs.schedule_kind.value='once';if(changed) applyDefaults();}
+    for(const key of ['delivery_format','collaboration','schedule_kind','min_sources','independent_review','opposing_views']) inputs[key].disabled=debate;
+    syncTiming();
+  }
+  inputs.goal.addEventListener('change',()=>syncDebate(true));syncDebate();
   timing.append(node('p','时间按当前时区填写。定期任务验收后建立下一期；事件发生后由 Agent 附依据确认触发。','muted'));
-  function setAuthors(list) {participants=list||[];const selected=inputs.author_id.value||String(initial.delivery.author_id||'');inputs.author_id.replaceChildren(new Option('由认领者或主持人负责',''));for(const p of participants) inputs.author_id.add(new Option(p.name,String(p.id)));if(selected&&!participants.some(p=>String(p.id)===selected)) inputs.author_id.add(new Option(`历史作者 #${selected}`,selected));inputs.author_id.value=selected;}
+  function setAuthors(list) {participants=list||[];const selected=inputs.author_id.value||String(initial.delivery.author_id||'');inputs.author_id.replaceChildren(new Option(inputs.goal.value==='active_debate'?'首位参与的可用 Agent 总结':'由认领者或主持人负责',''));for(const p of participants) inputs.author_id.add(new Option(p.name,String(p.id)));if(selected&&!participants.some(p=>String(p.id)===selected)) inputs.author_id.add(new Option(`历史作者 #${selected}`,selected));inputs.author_id.value=selected;}
   setAuthors(participants);
   function read() {
     const kind=inputs.schedule_kind.value,schedule={kind,start_at:inputs.start_at.value?new Date(inputs.start_at.value).toISOString():null};
     if(kind==='recurring') schedule.interval_days=Number(inputs.interval_days.value);
     if(kind==='event') schedule.event=inputs.event.value;
+    if(inputs.goal.value==='active_debate') schedule.end_at=inputs.end_at.value?new Date(inputs.end_at.value).toISOString():null;
     return {goal:inputs.goal.value,collaboration:inputs.collaboration.value,acceptance:{criteria:inputs.criteria.value,min_sources:Number(inputs.min_sources.value),independent_review:inputs.independent_review.checked,opposing_views:inputs.opposing_views.checked},schedule,delivery:{format:inputs.delivery_format.value,author_id:inputs.author_id.value?Number(inputs.author_id.value):null}};
   }
   return {root,read,setAuthors};

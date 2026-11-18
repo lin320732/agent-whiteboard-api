@@ -15,6 +15,9 @@ test('guide is authenticated, matches the handbook, and conditional requests sti
   const response=await guideFetch(f,f.host.auth),guide=await response.json();
   assert.equal(response.status,200);
   assert.equal(guide.markdown,readFileSync(new URL('../docs/AGENT_LOOP.md',import.meta.url),'utf8'));
+  assert.ok(guide.markdown.includes('## Markdown 排版'));
+  assert.ok(guide.markdown.includes('对应文字字段直接提交 Markdown 原文'));
+  assert.ok(guide.markdown.includes('不能只在 Markdown 正文中贴链接代替'));
   assert.equal(guide.instructions,'');
   assert.ok(guide.bootstrap.includes('/api/agent-guide'));
   const etag=response.headers.get('etag');assert.ok(etag);
@@ -64,4 +67,56 @@ test('simultaneous guide publications have one winner and discovery never includ
     assert.equal(r.data.agent_guide.read_before_each_poll,true);
     assert.equal(JSON.stringify(r.data).includes('-private'),false);
   }
+});
+
+test('per-Agent guidance is scoped, versioned, previewable by admins and removable',async()=>{
+  const f=await fixture(),{request,admin,host,worker,DB}=f;
+  const base=await (await guideFetch(f,host.auth)).json();
+  assert.equal((await (await guideFetch(f,worker.auth)).json()).version,base.version,'多个 Agent 共用同一份全域指南');
+
+  assert.equal((await request('GET',`/api/admin/agent-guide?agent_id=${host.id}`,undefined,admin)).status,200);
+  assert.equal((await request('GET',`/api/admin/agent-guide?agent_id=${host.id}`,undefined,host.auth)).status,403,'Agent 不能预览别人的指南');
+  assert.equal((await request('GET','/api/admin/agent-guide?agent_id=9999',undefined,admin)).status,404);
+  assert.equal((await request('GET','/api/admin/agent-guide?agent_id=abc',undefined,admin)).status,400);
+
+  const own='只有 Host 做：先核对续费表，再回 inbox。';
+  const posted=await request('POST','/api/admin/agent-guide',{version:base.version,instructions:own,agent_id:host.id},admin);
+  assert.equal(posted.status,200);
+  assert.equal(posted.data.agent_id,host.id);
+  assert.equal(posted.data.personal.instructions,own);
+  assert.ok(posted.data.markdown.endsWith(`## 管理员给你的工作指示\n\n${own}\n`));
+
+  const hostGuide=await (await guideFetch(f,host.auth)).json();
+  const workerGuide=await (await guideFetch(f,worker.auth)).json();
+  assert.equal(hostGuide.personal.instructions,own);
+  assert.equal(workerGuide.personal,null);
+  assert.equal(workerGuide.markdown,base.markdown,'别的 Agent 看不到个人指示');
+  assert.equal(workerGuide.version,base.version,'个人指示不改变别人的版本');
+  assert.notEqual(hostGuide.version,base.version);
+  assert.equal((await guideFetch(f,worker.auth,{'If-None-Match':`"${base.version}"`})).status,304);
+  assert.equal((await guideFetch(f,host.auth,{'If-None-Match':`"${base.version}"`})).status,200);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM agent_guide_revisions').get().n,0,'个人指示不写全域表');
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM agent_guide_personal_revisions').get().n,1);
+
+  assert.equal((await request('POST','/api/admin/agent-guide',{version:base.version,instructions:'stale',agent_id:host.id},admin)).status,409);
+  assert.equal((await request('POST','/api/admin/agent-guide',{version:hostGuide.version,instructions:'x',agent_id:9999},admin)).status,404);
+  assert.equal((await request('POST','/api/admin/agent-guide',{version:hostGuide.version,instructions:'x',agent_id:-1},admin)).status,400);
+  assert.equal((await request('POST','/api/admin/agent-guide',{version:hostGuide.version,instructions:'x',agent_id:host.id},host.auth)).status,403);
+
+  // Version is per scope: the shared scope still accepts the version read before the personal post.
+  const shared=await request('POST','/api/admin/agent-guide',{version:base.version,instructions:'全体的优先事项'},admin);
+  assert.equal(shared.status,200);
+  const hostBoth=await (await guideFetch(f,host.auth)).json();
+  assert.ok(hostBoth.markdown.indexOf('全体的优先事项')<hostBoth.markdown.indexOf(own),'全域段落在个人指示之前');
+
+  const cleared=await request('POST','/api/admin/agent-guide',{version:hostBoth.version,instructions:'',agent_id:host.id},admin);
+  assert.equal(cleared.status,200);
+  assert.equal(cleared.data.personal,null);
+  assert.equal(DB.sqlite.prepare('SELECT COUNT(*) AS n FROM agent_guide_personal_revisions').get().n,0,'清空个人指示会删除记录');
+  assert.ok(cleared.data.markdown.includes('全体的优先事项'));
+  assert.ok(!cleared.data.markdown.includes(own));
+
+  const migration=readFileSync(new URL('../migrations/0009-agent-guide-personal.sql',import.meta.url),'utf8');
+  const fresh=new DatabaseSync(':memory:');fresh.exec(migration);fresh.exec(migration);
+  assert.deepEqual(fresh.prepare('PRAGMA table_info(agent_guide_personal_revisions)').all(),DB.sqlite.prepare('PRAGMA table_info(agent_guide_personal_revisions)').all());fresh.close();
 });

@@ -6,3 +6,4 @@ node_modules/
 .bootstrap-key
 .admin-login.json
 .dev.vars
+.api-key.revoked-*

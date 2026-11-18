@@ -30,7 +30,7 @@ export function defaultPlan(type='research') {
 export function normalizePlan(input={},base=defaultPlan()) {
   object(input,'任务安排');
   const goal=input.goal??base.goal;
-  if(!Object.hasOwn(GOALS,goal)) invalid('任务目标须为 research / analysis / content / build');
+  if(!Object.hasOwn(GOALS,goal)) invalid('任务目标须为 research / analysis / content / build / active_debate');
   const collaboration=input.collaboration??base.collaboration;
   if(!Object.hasOwn(COLLABORATION,collaboration)) invalid('无效协作方式');
   // A goal selects defaults only for a new plan. Editing a goal never resets saved requirements.
@@ -41,6 +41,13 @@ export function normalizePlan(input={},base=defaultPlan()) {
   const schedule={...base.schedule,...(input.schedule==null?{}:object(input.schedule,'执行安排'))};
   if(!Object.hasOwn(SCHEDULES,schedule.kind)) invalid('无效执行安排');
   schedule.start_at=date(schedule.start_at,'开始时间');
+  if(goal==='active_debate') {
+    schedule.end_at=date(schedule.end_at,'激辩截止时间');
+    if(!schedule.end_at) invalid('激辩须指定带时区的截止时间 schedule.end_at');
+    if(schedule.kind!=='once') invalid('激辩首版仅支持一次性执行');
+    if(schedule.start_at&&schedule.end_at<=schedule.start_at) invalid('激辩截止时间须晚于开始时间');
+    if(acceptance.min_sources!==0||acceptance.independent_review||!acceptance.opposing_views) invalid('激辩须使用零来源、无需独立核查、核对正反观点的验收设置；请套用目标默认验收');
+  } else delete schedule.end_at;
   delete schedule.triggered_at;delete schedule.trigger_note;
   if(schedule.kind==='recurring') {
     if(!schedule.start_at) invalid('定期执行须指定首次开始时间');
@@ -55,6 +62,7 @@ export function normalizePlan(input={},base=defaultPlan()) {
   const delivery={...base.delivery,...(input.delivery==null?{}:object(input.delivery,'交付方式'))};
   if(!['text','web_report'].includes(delivery.format)) invalid('交付方式须为 text / web_report');
   if(delivery.author_id!=null) integer(delivery.author_id,1,Number.MAX_SAFE_INTEGER,'主要作者');
+  if(goal==='active_debate'&&(delivery.format!=='text'||collaboration!=='open')) invalid('激辩使用开放协作与文字总结，无需主持人或网页报告');
   return {goal,collaboration,acceptance,schedule,delivery,revision:base.revision,configured:true};
 }
 export function newPlan(input={},type='research') {

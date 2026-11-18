@@ -1,6 +1,8 @@
 import { hashSecret, originAllowed, permit } from './auth.js';
 import { GUIDE_DISCOVERY } from './agent-guide.js';
 import { readPlan, normalizePlan, savePlan, scheduleState, normalizeReport } from './task-plan.js';
+import { readTaskActivity } from './task-activity.js';
+import { isActiveDebate, discussionContext, personalDebateTurn, DEBATE_POLL_SECONDS } from './active-debate.js';
 
 export class WorkError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
@@ -13,7 +15,7 @@ export async function readBatch(db, queries) {
 }
 export const first = (db, sql, ...args) => db.prepare(sql).bind(...args).first();
 export const run = (db, sql, ...args) => db.prepare(sql).bind(...args).run();
-export const now = () => new Date().toISOString();
+export const now = () => new Date(Date.now()).toISOString();
 export function text(value, max = 12000) { if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(`内容须为 1–${max} 个字符`); return value.trim(); }
 export function id(value) { if (!Number.isSafeInteger(Number(value)) || Number(value) <= 0) fail('无效编号'); return Number(value); }
 export function links(value = []) {
@@ -63,22 +65,39 @@ export async function workflowContext(db, task) {
   ]);
   const profile=profiles[0]||null;
   const plan=await readPlan(db,task,profile),scheduled=scheduleState(plan);
+  const discussion=isActiveDebate(plan)?await discussionContext(db,task,plan,people):null;
   const names=new Map(people.map(p=>[p.id,p.name]));
   for(const i of issues) { i.author=names.get(i.author_id)||'历史记录';i.responder=names.get(i.responder_id)||'';i.resolver=names.get(i.resolver_id)||''; }
-  for(const s of subtasks) {s.history=subtaskEvents.filter(e=>e.subtask_id===s.id).map(e=>({...e,actor:names.get(e.actor_id)||'历史账号',detail:JSON.parse(e.detail||'{}')}));s.assignee=names.get(s.assignee_id)||'未知账号';s.assignee_active=!!people.find(p=>p.id===s.assignee_id)?.active;s.ack_overdue=s.state==='assigned'&&Date.now()-Date.parse(s.assigned_at)>=7200000;s.overdue=['accepted','waiting'].includes(s.state)&&Date.parse(s.resume_at||s.due_at)<=Date.now();}
+  for(const s of subtasks) {s.history=subtaskEvents.filter(e=>e.subtask_id===s.id).map(e=>({...e,actor:names.get(e.actor_id)||'历史账号',detail:JSON.parse(e.detail||'{}')}));s.assignee=names.get(s.assignee_id)||'未知账号';s.reviewer=names.get(s.reviewer_id)||'';s.assignee_active=!!people.find(p=>p.id===s.assignee_id)?.active;s.ack_overdue=s.state==='assigned'&&Date.now()-Date.parse(s.assigned_at)>=7200000;s.overdue=['accepted','waiting'].includes(s.state)&&Date.parse(s.resume_at||s.due_at)<=Date.now();}
   for(const o of outcomes) {o.author=names.get(o.author_id)||'未知账号';o.source_refs=JSON.parse(o.source_refs);o.report=JSON.parse(deliveries.find(d=>d.outcome_id===o.id)?.report_json||'null');}
   const outcome=outcomes[0]||null;
+  if(discussion) discussion.has_summary=!!outcome&&Date.parse(outcome.created_at)>=Date.parse(discussion.end_at);
   // Preserve pre-upgrade review fingerprints until an existing task explicitly adopts a plan.
-  const fingerprint=await hashSecret(JSON.stringify({summary:task.result_summary,links:task.result_links,claimant:task.claimed_by,profile:profile?{host_id:profile.host_id,acceptance:profile.acceptance,min_sources:profile.min_sources}:null,...(plan.configured?{plan}:{}),outcome:outcome?.id||null,issues:issues.map(i=>({id:i.id,text:i.text,response:i.response,evidence:i.evidence}))}));
+  const fingerprint=await hashSecret(JSON.stringify({summary:task.result_summary,links:task.result_links,claimant:task.claimed_by,profile:profile?{host_id:profile.host_id,acceptance:profile.acceptance,min_sources:profile.min_sources}:null,...(plan.configured?{plan}:{}),...(discussion?{discussion:discussion.last_message_id}:{}),outcome:outcome?.id||null,issues:issues.map(i=>({id:i.id,text:i.text,response:i.response,evidence:i.evidence}))}));
   const authors=new Set([profile?.host_id,plan.delivery.author_id,outcome?.author_id,...contributors.map(p=>p.id),...(outcome?.source_refs||[]).map(s=>s.author_id),...people.filter(p=>p.actor===task.claimed_by).map(p=>p.id)].filter(Boolean));
   const independent=reviews.filter(r=>r.fingerprint===fingerprint&&!authors.has(r.reviewer_id));
-  const waiting=!!profile?.resume_at&&Date.parse(profile.resume_at)>Date.now();
-  return {enabled:!!profile||plan.configured,plan,scheduled,waiting:waiting||!scheduled.ready,resume_at:waiting?profile.resume_at:scheduled.resume_at,wait_reason:waiting?profile.wait_reason:scheduled.reason,host_id:profile?.host_id||null,host:names.get(profile?.host_id)||'',report_author_id:plan.delivery.author_id,report_author:names.get(plan.delivery.author_id)||'',acceptance:plan.acceptance.criteria,min_sources:plan.acceptance.min_sources,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length,previous_task_id:periods.find(p=>p.next_task_id===task.id)?.previous_task_id||null,next_task_id:periods.find(p=>p.previous_task_id===task.id)?.next_task_id||null};
+  const waiting=!discussion&&!!profile?.resume_at&&Date.parse(profile.resume_at)>Date.now();
+  return {enabled:!!profile||plan.configured,plan,scheduled,...(discussion?{discussion}:{}),waiting:waiting||!scheduled.ready,resume_at:waiting?profile.resume_at:scheduled.resume_at,wait_reason:waiting?profile.wait_reason:scheduled.reason,host_id:profile?.host_id||null,host:names.get(profile?.host_id)||'',report_author_id:plan.delivery.author_id,report_author:names.get(plan.delivery.author_id)||'',acceptance:plan.acceptance.criteria,min_sources:plan.acceptance.min_sources,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length,previous_task_id:periods.find(p=>p.next_task_id===task.id)?.previous_task_id||null,next_task_id:periods.find(p=>p.previous_task_id===task.id)?.next_task_id||null};
 }
-export async function decorateCollaboration(db, task, context, readiness, collaboration) {
+export async function decorateCollaboration(db, task, context, readiness, collaboration, principal=null) {
   const work=await workflowContext(db,task);
   const check=(key,label,met,detail)=>({key,label,met,detail});
-  if(work.enabled) {
+  if(work.discussion) {
+    const d=work.discussion,summary=d.has_summary?work.outcomes[0]?.summary||'':'';
+    d.next_action=await personalDebateTurn(db,d,d.messages,principal,d.summary_author_id,!!summary);
+    delete d.messages;
+    const checks=[check('deadline','已到讨论截止时间',d.phase==='ended'||d.phase==='done','持续讨论至 '+d.end_at),
+      check('agents','至少两位 Agent 发言',d.participants>=2,`已有 ${d.participants} 位 Agent`),
+      check('stances','不同 Agent 提出正反观点',d.opposing_views,d.opposing_views?'已有正反观点':'等待不同 Agent 提出支持与反驳'),
+      check('rounds','至少三轮交锋',d.rounds>=d.min_rounds,`已完成 ${d.rounds}/${d.min_rounds} 轮；达标后继续到截止时间`),
+      check('summary','已提交截止总结',!!summary,summary?'已有截止总结':'截止后总结观点、分歧与参与情况'),
+      check('issues','重要问题已解决',!work.blocking,work.blocking?`还有 ${work.blocking} 项重要问题`:'没有未解决的重要问题')];
+    readiness={ready:checks.every(c=>c.met),checks};
+    const turn=d.next_action,active=d.phase==='active',ended=d.phase==='ended';
+    const action=turn?.kind==='summarize'?'outcome':active&&turn?.kind!=='wait'?'debate':ended?'coordinate':'wait';
+    collaboration={...collaboration,participants:d.participants,help_wanted:(active&&(!turn||turn.kind!=='wait'))||(ended&&turn?.kind==='summarize'),actions:active?['debate']:ended?['outcome']:[],suggested_action:action,
+      missing:checks.filter(c=>!c.met),reason:turn?.reason||(active?'开放激辩，无需认领；主动发言并持续到截止时间':ended&&!d.participation_sufficient?'激辩已截止，参与不足，等待总结与管理员处理':'激辩已截止，等待总结与验收')};
+  } else if(work.enabled) {
     const current=work.outcomes[0];
     const summary=current?.summary||task.result_summary||'';
     const missingReport=work.plan.delivery.format==='web_report'&&!current?.report;
@@ -120,6 +139,13 @@ async function inbox(db,p) {
     const w=await workflowContext(db,t);
     const missingReport=w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report;
     const base={task_id:t.id,title:t.title};
+    if(w.discussion) {
+      const d=w.discussion,turn=await personalDebateTurn(db,d,d.messages,p,d.summary_author_id,d.has_summary);
+      if(agent(p)&&turn?.kind!=='wait') items.push({...base,...turn,kind:'active_debate',action:turn?.kind,expected_latest_id:d.last_message_id,end_at:d.end_at});
+      else if(admin(p)&&d.phase==='ended') items.push({...base,kind:'active_debate',action:turn?.kind==='summarize'?'summarize':'decide',reason:d.participation_sufficient?'激辩已截止，请检查总结与验收条件':'激辩已截止，参与不足；请决定关闭或调整截止时间'});
+      else if(turn?.kind==='wait') waiting.push({...base,...turn,kind:'active_debate',action:'wait'});
+      continue;
+    }
     if(w.waiting&&!w.blocking) {
       if(admin(p)||w.host_id===p.id||w.report_author_id===p.id||t.claimed_by===p.name||(!w.host_id&&agent(p))) waiting.push({...base,kind:'schedule',resume_at:w.resume_at,reason:w.wait_reason});
       continue;
@@ -141,11 +167,13 @@ async function inbox(db,p) {
     if(agent(p)&&w.enabled&&!missingReport&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示':'请独立核查当前成果'});
     if(agent(p)) for(const s of w.subtasks.filter(s=>s.state==='submitted'&&s.assignee_id!==p.id)) items.push({...base,kind:'subtask_review',subtask_id:s.id,title:s.title});
   }
-  return {items,waiting,poll_after_seconds:900,agent_guide:GUIDE_DISCOVERY};
+  const priority=item=>item.kind!=='active_debate'?0:item.pending_reply_ids?.length?1:item.action==='summarize'?2:item.action==='enter'?3:4;
+  items.sort((a,b)=>priority(a)-priority(b));
+  return {items,waiting,poll_after_seconds:[...items,...waiting].some(i=>i.kind==='active_debate')?DEBATE_POLL_SECONDS:900,agent_guide:GUIDE_DISCOVERY};
 }
 
 export async function collaborationRoute(request, env, principal, path) {
-  const match=path.match(/^\/api\/tasks\/(\d+)\/(plan|trigger|workflow|outcomes|reviews|issues|subtasks|wait)(?:\/(\d+)\/(respond|resolve|dispute|accept|decline|wait|submit|check|reassign|remind))?$/);
+  const match=path.match(/^\/api\/tasks\/(\d+)\/(activity|plan|trigger|workflow|outcomes|reviews|issues|subtasks|wait|close)(?:\/(\d+)\/(respond|resolve|dispute|accept|decline|wait|submit|check|reassign|remind))?$/);
   if(!match&&!['/api/inbox','/api/participants'].includes(path)) return null;
   try {
     if(!principal?.id) fail('请使用个人账号或独立 Agent 令牌',401);
@@ -156,7 +184,12 @@ export async function collaborationRoute(request, env, principal, path) {
     if(path==='/api/participants'&&request.method==='GET') return answer({agents:await all(db,`SELECT p.id,p.username,COALESCE(l.display_name,p.name) AS name FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE p.kind='agent' AND p.active=1 ORDER BY p.id`)});
     if(!match) fail('不支持此方法',405);
     const taskId=Number(match[1]),kind=match[2],recordId=match[3]?Number(match[3]):null,action=match[4];
-    const task=await requireTask(db,taskId), w=await workflowContext(db,task);
+    const task=await requireTask(db,taskId);
+    if(kind==='activity') {
+      if(request.method!=='GET'||recordId||action) fail('不支持此方法',405);
+      return answer(await readTaskActivity(db,task));
+    }
+    const w=await workflowContext(db,task);
     if(request.method==='GET') return answer({workflow:w,plan:w.plan});
     if(!agent(p)&&!admin(p)) fail('需要 Agent 或管理员权限',403);
     const b=await request.json().catch(()=>null);if(!b||typeof b!=='object'||Array.isArray(b)) fail('无效 JSON');
@@ -166,8 +199,19 @@ export async function collaborationRoute(request, env, principal, path) {
       if(b.revision!==w.plan.revision) fail('任务安排已更新，请刷新后再保存',409);
       const plan=normalizePlan(b,w.plan);
       const saved=await savePlan(db,task,plan,b.revision);
+      if(isActiveDebate(saved)&&task.status==='review'&&Date.parse(saved.schedule.end_at)>Date.now()) await run(db,"UPDATE tasks SET status='in_progress',updated_at=? WHERE id=? AND status='review'",now(),taskId);
       await audit(db,taskId,p,'plan',taskId,JSON.stringify(saved));
       return answer({plan:saved});
+    }
+    if(kind==='close') {
+      if(!admin(p)) fail('只有管理员可关闭激辩',403);
+      if(!w.discussion||['done','closed','proposed'].includes(task.status)) fail('仅可关闭已批准且未结束的激辩',409);
+      const reason=text(b.reason,2000);
+      await db.batch([
+        db.prepare("UPDATE tasks SET status='closed',updated_at=? WHERE id=? AND status NOT IN ('done','closed','proposed')").bind(now(),taskId),
+        db.prepare("INSERT INTO work_activity(task_id,actor_id,kind,record_id,detail,created_at) SELECT ?,?,'discussion_close',?,?,? WHERE changes()=1").bind(taskId,p.id,taskId,JSON.stringify({reason}),now()),
+      ]);
+      return answer({status:'closed'});
     }
     if(kind==='workflow') {
       if(['done','closed'].includes(task.status)) fail('已结束的任务不能更改主持设置',409);
@@ -177,7 +221,7 @@ export async function collaborationRoute(request, env, principal, path) {
       const plan=normalizePlan({collaboration:'hosted',acceptance:{criteria:acceptance,min_sources:min}},w.plan);
       await savePlan(db,task,plan,w.plan.revision);
       await run(db,`INSERT INTO task_workflows(task_id,host_id,acceptance,min_sources,created_at) VALUES(?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET host_id=excluded.host_id,acceptance=excluded.acceptance,min_sources=excluded.min_sources`,taskId,hostId,acceptance,min,now());
-      await audit(db,taskId,p,'host',taskId,`指定主持，验收：${acceptance}`);
+      await audit(db,taskId,p,'host',taskId,JSON.stringify({host_id:hostId,acceptance,min_sources:min}));
       return answer({host_id:hostId});
     }
     writable(task);
@@ -193,6 +237,7 @@ export async function collaborationRoute(request, env, principal, path) {
     }
     if(['outcomes','subtasks'].includes(kind)&&!w.scheduled.ready) fail(w.scheduled.reason,409);
     if(kind==='wait') {
+      if(w.discussion) fail('激辩通过计划开始与截止时间安排；请修改任务安排或关闭讨论',409);
       if(!w.host_id||!hostAllowed(p,w)) fail('请先指定主持人，再设置临时等待',403);
       const reason=b.resume_at?text(b.reason,2000):'',resume=b.resume_at?future(b.resume_at):null;
       await run(db,'UPDATE task_workflows SET wait_reason=?,resume_at=? WHERE task_id=?',reason,resume,taskId);
@@ -200,9 +245,11 @@ export async function collaborationRoute(request, env, principal, path) {
       return answer({resume_at:resume});
     }
     if(kind==='outcomes') {
+      if(w.discussion&&w.discussion.phase!=='ended') fail('激辩持续到截止时间，之后才提交总结',409);
+      if(w.discussion&&b.fingerprint!==w.fingerprint) fail('讨论或总结已更新，请重读后再提交',409);
       const report=b.report==null?null:normalizeReport(b.report);
       const reportTask=w.plan.delivery.format==='web_report'||!!report;
-      const permitted=admin(p)||(agent(p)&&(reportTask&&w.report_author_id?p.id===w.report_author_id:hostAllowed(p,w)||(!w.host_id&&task.claimed_by===p.name)));
+      const permitted=admin(p)||(agent(p)&&(w.discussion?p.id===w.discussion.summary_author_id:reportTask&&w.report_author_id?p.id===w.report_author_id:hostAllowed(p,w)||(!w.host_id&&task.claimed_by===p.name)));
       if(!w.enabled||!permitted) fail('由管理员、主持人或指定的主要作者提交成果',403);
       if(w.plan.delivery.format==='web_report'&&!report) fail('请先发布网页报告，并提交 report.url 与 report.revision');
       if((report||b.fingerprint!=null)&&b.fingerprint!==w.fingerprint) fail('成果已更新，请重读后再发布当前版本',409);

@@ -1,0 +1,104 @@
+async page => {
+  await page.unrouteAll({behavior:'wait'});
+  await page.setViewportSize({width:1440,height:1000});
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  let ended=false,closed=false,summary='',created=null,posts=[],rejectOnce=true;
+  const end_at='2030-01-01T20:00:00+08:00';
+  const plan={goal:'active_debate',collaboration:'open',acceptance:{criteria:'持续讨论至截止并总结',min_sources:0,independent_review:false,opposing_views:true},schedule:{kind:'once',start_at:null,end_at},delivery:{format:'text',author_id:null},revision:1,configured:true};
+  const debate=[{id:53,agent:'Worker',role:'agent',stance:'支持',content:'我主张先明确假设，再展开讨论。',created_at:'2026-11-18T10:00:00Z'}];
+  const discussion=()=>({phase:closed?'closed':ended?'ended':'active',end_at,participants:1,rounds:0,min_rounds:3,participation_sufficient:false,last_message_id:debate.at(-1).id,summary_author_id:2,summary_author:'Worker',has_summary:!!summary});
+  const task=()=>({id:1,title:'自由观点激辩',type:'active_debate',status:closed?'closed':ended?'review':'in_progress',created_by:'Owner',plan,discussion:discussion()});
+  const workflow=()=>({enabled:true,plan,scheduled:{ready:true},waiting:false,host_id:null,host:'',report_author_id:null,fingerprint:`fp-${debate.at(-1).id}-${summary?'summary':'none'}`,author_ids:[],issues:[],subtasks:[],reviews:[],current_reviews:[],blocking:0,discussion:discussion(),outcomes:summary?[{id:1,author_id:1,author:'Owner',summary,changes:'截止总结',links:'',source_refs:[]}]:[]});
+  const readiness=()=>({ready:false,checks:[{key:'agents',label:'至少两位 Agent 发言',met:false,detail:'只有一位 Agent'},{key:'summary',label:'已提交截止总结',met:!!summary,detail:summary?'已有总结':'截止后总结'}]});
+  const json=data=>({status:200,contentType:'application/json',body:JSON.stringify(data)});
+  await page.route('**/api/**',async route=>{
+    const request=route.request(),path=request.url().replace(/^https?:\/\/[^/]+/,'').split('?')[0];
+    if(request.method()==='POST') {
+      const b=JSON.parse(request.postData());posts.push({path,body:b});
+      if(path==='/api/tasks') {created=b;return route.fulfill(json({ok:true,id:1}));}
+      if(path.endsWith('/debate')) {
+        if(rejectOnce) {rejectOnce=false;debate.push({id:54,agent:'Checker',role:'agent',stance:'反駁',reply_to:53,content:'我补充一个刚出现的反例，请回应新的边界情境。'});return route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:'已有新发言，请重读上下文后再回应'})});}
+        debate.push({id:55,agent:'Owner',role:'human',...b,links:(b.links||[]).join('\n')});
+      }
+      if(path.endsWith('/outcomes')) summary=b.summary;
+      if(path.endsWith('/close')) closed=true;
+      return route.fulfill(json({ok:true,id:1}));
+    }
+    if(path==='/api/auth/me') return route.fulfill(json({user:{id:1,role:'admin',kind:'human',name:'Owner'}}));
+    if(path==='/api/tasks') return route.fulfill(json({tasks:[task()]}));
+    if(path==='/api/tasks/1') return route.fulfill(json({task:task(),plan,workflow:workflow(),debate,verify_readiness:readiness(),collaboration:{help_wanted:!ended,reason:'主动入场，持续交锋',suggested_action:ended?'outcome':'debate'}}));
+    if(path==='/api/channels') return route.fulfill(json({channels:[]}));
+    if(path==='/api/messages') return route.fulfill(json({messages:[]}));
+    if(path==='/api/leaderboard') return route.fulfill(json({leaderboard:[]}));
+    if(path==='/api/participants') return route.fulfill(json({agents:[{id:2,name:'Worker'}]}));
+    if(path==='/api/admin/users'||path==='/api/admin/agents') return route.fulfill(json({accounts:[]}));
+    if(path==='/api/inbox') return route.fulfill(json({items:[],waiting:[]}));
+    if(path==='/api/digest') return route.fulfill(json({highlights:[],decisions:[]}));
+    if(path==='/api/topics') return route.fulfill(json({themes:[],topics:[]}));
+    if(path.endsWith('/contributions')) return route.fulfill(json({contributions:[]}));
+    return route.fulfill(json({ok:true}));
+  });
+  await page.goto('http://127.0.0.1:8765/');
+  await page.locator('#navTasks').click();
+  await page.locator('#createTaskBox > summary').click();
+  const create=page.locator('#taskForm');
+  await create.getByLabel('任务目标',{exact:true}).selectOption('active_debate');
+  const deadline=create.getByLabel('激辩截止时间',{exact:true});await deadline.waitFor();
+  await create.getByLabel('截止总结作者（可选）',{exact:true}).waitFor();
+  if(!await deadline.getAttribute('required')?.then(x=>x!==null)) throw Error('激辩没有要求截止时间');
+  if(!await create.getByLabel('需要核对正反观点',{exact:true}).isChecked()||await create.getByLabel('需要独立核查',{exact:true}).isChecked()) throw Error('激辩默认验收错误');
+  if(await create.getByLabel('最少来源数量',{exact:true}).inputValue()!=='0') throw Error('激辩被要求来源');
+  await create.getByLabel('标题',{exact:true}).fill('持续观点激辩');
+  await deadline.fill('2030-01-01T20:00');
+  await create.getByRole('button',{name:'发布到白板'}).click();
+  await page.locator('#taskDetail h3').getByText('自由观点激辩',{exact:true}).waitFor();
+  if(created?.type!=='active_debate'||created.plan?.goal!=='active_debate'||!created.plan.schedule.end_at.endsWith('Z')) throw Error('激辩发布未正确提交截止时间与类型');
+  await page.locator('.active-debate-progress').getByText('1 位 Agent · 0/3 轮交锋',{exact:true}).waitFor();
+  if(await page.locator('#taskDetail').getByText('等待 Agent 认领。',{exact:true}).count()) throw Error('激辩仍提示认领');
+  await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
+  if(await page.locator('.outcome-form,.debate-summary-form').count()) throw Error('激辩截止前允许收尾');
+  await page.locator('#taskDetail').getByRole('tab',{name:/^讨论/}).click();
+  const form=page.locator('#debateForm');await form.getByRole('heading',{name:'参与激辩'}).waitFor();
+  await form.getByRole('combobox',{name:'立场',exact:true}).selectOption('反驳');
+  await form.getByRole('combobox',{name:'回复（可选）',exact:true}).selectOption('53');
+  await form.getByLabel('发言内容',{exact:true}).fill('我质疑这个前提：假设需要用实际情境验证，而非只在抽象层讨论。');
+  await form.getByRole('button',{name:'发表观点'}).click();
+  await page.locator('#notice').getByText('已有新发言，请重读上下文后再回应',{exact:true}).waitFor();
+  if(!await form.getByLabel('发言内容',{exact:true}).inputValue()) throw Error('冲突导致发言草稿丢失');
+  await form.getByRole('button',{name:'发表观点'}).click();
+  await page.locator('#debateForm').waitFor();
+  const sent=posts.find(p=>p.path.endsWith('/debate'))?.body;
+  if(sent.expected_latest_id!==53||sent.reply_to!==53||sent.links.length!==0) throw Error('发言未携带上下文版本或仍强制外链');
+  if(posts.filter(p=>p.path.endsWith('/debate')).at(-1).body.expected_latest_id!==54) throw Error('冲突后没有刷新讨论上下文');
+  await page.locator('#notice').getByText('辩论已发布',{exact:true}).waitFor();
+  await page.locator('#taskDetail article').filter({hasText:'我质疑这个前提'}).waitFor();
+  await page.screenshot({path:'.playwright-cli/active-debate-active-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)) throw Error('激辩讨论表单手机版溢出');
+  await page.screenshot({path:'.playwright-cli/active-debate-active-mobile.png',fullPage:false});
+  await page.setViewportSize({width:1440,height:1000});
+  ended=true;await page.reload();
+  await page.locator('#decisionList').getByText('激辩参与不足',{exact:true}).waitFor();
+  await page.locator('#navTasks').click();await page.locator('#taskList .task-item').first().click();
+  await page.locator('#taskDetail').getByRole('tab',{name:/^讨论/}).click();
+  if(await page.locator('#debateForm').count()) throw Error('截止后仍可继续发言');
+  await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
+  await page.getByText('填写激辩截止总结',{exact:true}).click();
+  const summaryForm=page.locator('.debate-summary-form');
+  await summaryForm.getByLabel('观点、分歧与参与情况',{exact:true}).fill('本次只有一位 Agent 参与，未形成三轮交锋。保留原观点与未解决的假设，交管理员处理。');
+  await summaryForm.getByRole('button',{name:'提交截止总结'}).click();
+  await page.waitForFunction(()=>!document.querySelector('.debate-summary-form button')?.disabled);
+  if(!posts.some(p=>p.path.endsWith('/outcomes')&&p.body.fingerprint&&p.body.summary.includes('未形成三轮'))) throw Error('总结没有绑定当前上下文或没有提交');
+  await page.locator('#taskDetail').getByRole('tab',{name:'概览',exact:true}).click();
+  await page.locator('.arrangements-fold > summary').click();
+  await page.evaluate(()=>{window.prompt=()=> '参与不足，结束本次激辩';});
+  await page.getByRole('button',{name:'关闭激辩',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#taskDetail .badge.closed'));
+  if(!posts.some(p=>p.path.endsWith('/close')&&p.body.reason)) throw Error('关闭缺少原因');
+  await page.screenshot({path:'.playwright-cli/active-debate-desktop.png',fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)) throw Error('激辩手机页面横向溢出');
+  await page.screenshot({path:'.playwright-cli/active-debate-mobile.png',fullPage:true});
+  if(errors.length) throw Error(errors.join('\n'));
+  return {creation:true,deadline:true,debate:true,conflictDraft:true,summary:true,insufficient:true,close:true,mobile:true,pageErrors:errors.length};
+}

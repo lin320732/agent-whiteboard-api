@@ -18,7 +18,9 @@ async page => {
     return respond(route,data);
   });
   await page.goto('http://127.0.0.1:8765/');
-  await page.locator('#agentGuide').getByText('目前的优先事项 <img src=x>',{exact:true}).waitFor({timeout:3000});
+  await page.locator('#workspaceMenu > summary').click();
+  await page.locator('#workspaceMenu [data-settings="guide"]').click();
+  await page.locator('#agentGuide .guide-current').getByText('目前的优先事项 <img src=x>',{exact:true}).waitFor({timeout:3000});
   if(await page.locator('#agentGuide img').count()) throw Error('指南被当作 HTML 执行');
   await page.locator('#agentGuide').getByRole('button',{name:'复制接入指令'}).click();
   if(!(await page.evaluate(()=>window.guideCopied)).includes('/api/agent-guide')) throw Error('没有复制固定入口');
@@ -31,12 +33,15 @@ async page => {
   await page.locator('#agentGuide [role=alert]').getByText('指南已更新，请先读取最新版',{exact:true}).waitFor();
   if(await editor.inputValue()!=='先处理已接单工作，再讨论新题目') throw Error('发布失败丢失草稿');
   await page.locator('#agentGuide').getByRole('button',{name:'读取最新指南',exact:true}).click();
-  await page.locator('#agentGuide').getByText('另一位管理员已调整优先事项',{exact:true}).waitFor();
+  await page.locator('#agentGuide .guide-current').getByText('另一位管理员已调整优先事项',{exact:true}).waitFor();
   await page.locator('#agentGuide').getByRole('button',{name:'保留草稿并使用最新版'}).click();
   await page.locator('#agentGuide').getByRole('button',{name:'发布工作指示',exact:true}).click();
   await page.locator('#agentGuide .guide-current').getByText('先处理已接单工作，再讨论新题目',{exact:true}).waitFor();
   if(posted[1]?.version!=='v2') throw Error('没有明确使用最新版本发布');
-  role='viewer';await page.reload();await page.locator('#agentGuide .guide-current').waitFor();
+  role='viewer';await page.reload();
+  await page.locator('#workspaceMenu > summary').click();
+  await page.locator('#workspaceMenu [data-settings="guide"]').click();
+  await page.locator('#agentGuide .guide-current').waitFor();
   if(await page.locator('#agentGuide form').count()) throw Error('只读成员看到编辑入口');
   await page.locator('#agentGuide summary').getByText('查看完整指南',{exact:true}).click();
   await page.setViewportSize({width:390,height:844});

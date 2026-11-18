@@ -36,6 +36,9 @@ async page => {
     return route.fulfill(json({ok:true}));
   });
   await page.goto('http://127.0.0.1:8765/');
+  await page.locator('#navTasks').click();
+  // 发布任务是按需展开的表单。
+  await page.locator('#createTaskBox > summary').click();
   const create=page.locator('#taskForm');
   await create.getByLabel('任务目标',{exact:true}).selectOption('content');
   if(await create.getByLabel('需要独立核查',{exact:true}).isChecked()) throw Error('创作模板默认值错误');
@@ -46,12 +49,15 @@ async page => {
   await create.getByLabel('触发条件',{exact:true}).fill('官方公告发布');
   if(!await create.getByLabel('触发条件',{exact:true}).isVisible()||await create.getByLabel('每隔多少天执行').isVisible()) throw Error('执行安排条件字段错误');
   await page.locator('#taskList .task-item').first().click();
+  await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
   const published=page.locator('.current-outcome .published-report');
   await published.waitFor();
   if(await published.locator('img').count()) throw Error('报告标题被当成 HTML');
   const popupPromise=page.waitForEvent('popup');await published.click();const popup=await popupPromise;
   await popup.getByRole('heading',{name:'已发布的市场报告'}).waitFor();await popup.close();
-  await page.locator('.task-arrangements summary').click();
+  await page.locator('#taskDetail').getByRole('tab',{name:'概览',exact:true}).click();
+  await page.locator('#taskDetail .arrangements-fold > summary').click();
+  await page.locator('.task-arrangements').getByText('修改目标、验收与执行安排',{exact:true}).click();
   const settings=page.locator('.plan-settings');
   if(await settings.getByLabel('主要作者（可选）',{exact:true}).inputValue()!=='3') throw Error('未保留指定的报告作者');
   await settings.getByLabel('最少来源数量',{exact:true}).fill('3');
@@ -60,7 +66,8 @@ async page => {
   await settings.getByRole('button',{name:'保存任务安排'}).click();
   await page.locator('.task-arrangements').getByText('内容创作 · 主持分工 · 一次性',{exact:true}).waitFor();
   if(!posts.some(p=>p.path.endsWith('/plan')&&p.body.acceptance.min_sources===3&&p.body.delivery.author_id===3)) throw Error('任务安排未独立保存');
-  role='writer';await page.reload();await page.locator('#taskList .task-item').first().click();
+  role='writer';await page.reload();await page.locator('#navTasks').click();await page.locator('#taskList .task-item').first().click();
+  await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
   await page.locator('#taskDetail summary').getByText('编辑目前成果',{exact:true}).click();
   const composer=page.locator('.outcome-form');
   await composer.getByLabel('报告发布版本（填写新版本）',{exact:true}).fill('v2');
@@ -69,8 +76,9 @@ async page => {
   await composer.getByText('请确认发布版本后重试').waitFor();
   if(await composer.getByLabel('报告发布版本（填写新版本）',{exact:true}).inputValue()!=='v2') throw Error('报告发布失败后草稿丢失');
   await composer.getByRole('button',{name:'更新成果'}).click();
-  await page.locator('.published-report').filter({hasText:'v2'}).waitFor();
-  role='checker';await page.reload();await page.locator('#taskList .task-item').first().click();
+  await page.locator('#detailPanel-outcome .published-report').filter({hasText:'v2'}).waitFor();
+  role='checker';await page.reload();await page.locator('#navTasks').click();await page.locator('#taskList .task-item').first().click();
+  await page.locator('#taskDetail').getByRole('tab',{name:/^核查/}).click();
   const check=page.locator('.review-form');
   await check.getByLabel('核查说明',{exact:true}).fill('已实际打开 v2，对照来源，核实图表单位与页面展示');
   await check.getByRole('button',{name:'提交独立核查'}).click();

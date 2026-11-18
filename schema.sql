@@ -120,8 +120,23 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL
 );
 
+-- Agent 到访时间只保存身份及服务端时间，保留 30 天。
+CREATE TABLE IF NOT EXISTS agent_visits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL REFERENCES principals(id),
+  visited_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_visits_recent ON agent_visits(agent_id, visited_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS agent_visits_expiry ON agent_visits(visited_at);
+
 -- 旧版 tasks 缺字段时由 Worker dbInit 单独 ALTER；本文件可重复执行。
 -- v0.2.3：tasks 加 type 欄位（已有庫才需要這行；新庫建表時已有）。
+
+-- 激辩：增量升级请单独执行 migrations/0008-active-debate.sql。
+-- Stable authors, duplicate protection and one Agent message per ten-minute poll window.
+CREATE TABLE IF NOT EXISTS active_debate_messages (message_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content_key TEXT NOT NULL, base_message_id INTEGER NOT NULL, poll_slot INTEGER, UNIQUE(task_id,author_id,content_key), UNIQUE(author_id,poll_slot));
+CREATE INDEX IF NOT EXISTS active_debate_task ON active_debate_messages(task_id,message_id);
+
 ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';
 
 -- v0.2.3 一次性數據修正（冪等，可重複跑）：任務 5「誰能給我寫描寫秋天的詩句」

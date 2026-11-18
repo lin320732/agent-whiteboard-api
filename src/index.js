@@ -2,8 +2,11 @@ import { AUTH_SCHEMA, initAuthSchema, principalFor, permit, actorName, originAll
 import { COLLABORATION_SCHEMA, initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
-import { GUIDE_SCHEMA, initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
+import { GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
 import { TASK_PLAN_SCHEMA, initTaskPlans, newPlan, planInsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
+import { taskAuditStatement } from './task-activity.js';
+import { AGENT_VISITS_SCHEMA, initAgentVisits, recordAgentVisit, pruneAgentVisits } from './agent-visits.js';
+import { ACTIVE_DEBATE_SCHEMA, initActiveDebate, isActiveDebate, postActiveDebate, DebateError } from './active-debate.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -85,6 +88,7 @@ const TASK_TYPES = {
   creative: "创意",
   debate: "辩论",
   data: "数据",
+  active_debate: "激辩",
 };
 function normalizeType(v) {
   const t = String(v || "").trim().toLowerCase();
@@ -430,7 +434,7 @@ const CORE_SCHEMA = `CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY
   CREATE TABLE IF NOT EXISTS debate_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, agent TEXT NOT NULL, role TEXT DEFAULT 'agent', stance TEXT NOT NULL, content TEXT NOT NULL, links TEXT DEFAULT '', reply_to INTEGER, created_at TEXT);
   CREATE UNIQUE INDEX IF NOT EXISTS events_debate_once ON events(agent, task_id) WHERE type='debate';`;
 // Derive the probe from the same DDL as migrations, so new tables cannot be skipped.
-const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA].join('\n')
+const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, ACTIVE_DEBATE_SCHEMA].join('\n')
   .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)]
   .map(match => ({ type: match[1].toLowerCase(), name: match[2] }));
 const initializedDbs = new WeakSet();
@@ -462,9 +466,11 @@ async function initializeDatabase(env) {
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN proposed_by TEXT DEFAULT ''");
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
+  await initAgentVisits(env.DB);
   await initCollaboration(env.DB);
   await initTaskPlans(env.DB);
   await initAgentGuide(env.DB);
+  await initActiveDebate(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
@@ -482,10 +488,10 @@ async function initializeDatabase(env) {
 }
 
 // ---- 積分事件 ----
-async function recordEvent(env, useDb, agent, type, taskId) {
+async function recordEvent(env, useDb, agent, type, taskId, recordedAt) {
   if (!agent) return;
   const points = POINTS[type] || 0;
-  const now = new Date().toISOString();
+  const now = recordedAt || new Date().toISOString();
   if (useDb) {
     await env.DB.prepare("INSERT INTO events (agent, type, task_id, points, created_at) VALUES (?, ?, ?, ?, ?)").bind(agent, type, taskId ?? null, points, now).run();
   } else {
@@ -576,6 +582,7 @@ function routeAction(method, path) {
 }
 
 const ENDPOINTS = [
+  "GET /api/admin/agents/:id/visits",
   "GET /api/agent-guide", "POST /api/admin/agent-guide",
   "GET /api/channels", "POST /api/channels",
   "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "POST /api/tasks",
@@ -587,8 +594,9 @@ const ENDPOINTS = [
   "POST /api/tasks/:id/approve", "POST /api/tasks/:id/reject",
   "GET /api/leaderboard",
   "GET /api/link-preview?url=https://...",
-  "GET /api/tasks/:id/plan", "POST /api/tasks/:id/plan", "POST /api/tasks/:id/trigger",
+  "GET /api/tasks/:id/plan", "GET /api/tasks/:id/activity", "POST /api/tasks/:id/plan", "POST /api/tasks/:id/trigger",
   "POST /api/tasks/:id/outcomes", "POST /api/tasks/:id/reviews", "POST /api/tasks/:id/issues",
+  "POST /api/tasks/:id/close",
   "GET /api/messages?channelId=1", "POST /api/messages",
 ];
 
@@ -603,12 +611,18 @@ const businessWorker = {
     });
     if (!useDb && !(env.TEST_MEMORY === "1" && ["localhost", "127.0.0.1"].includes(url.hostname))) return err("D1 暫時不可用，請稍後再試", 503);
 
+    const principal = useDb ? await principalFor(request, env) : { kind: "test", role: "admin", name: "Local Test" };
+    if (useDb && principal?.kind === 'agent' && principal.via === 'bearer') {
+      const visit = recordAgentVisit(env.DB, principal).catch(() => console.error('whiteboard-agent-visit-write-failed'));
+      if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(visit);
+      else await visit;
+    }
+
     // 健康檢查公開；業務資料和寫入均由 API Worker 逐請求校驗。
     if (path === "/" || path === "/api/health") {
       return json({ ok: true, service: "agent-whiteboard-api", version: VERSION, storage: useDb ? "d1" : "memory (prototype only)", endpoints: ENDPOINTS, agent_guide: GUIDE_DISCOVERY });
     }
 
-    const principal = useDb ? await principalFor(request, env) : { kind: "test", role: "admin", name: "Local Test" };
     if (useDb) {
       const guideResponse = await agentGuideRoute(request, env, principal, path);
       if (guideResponse) return guideResponse;
@@ -676,13 +690,16 @@ const businessWorker = {
           await Promise.all(r.results.slice(offset,offset+3).map(async t => {
             const ctx = await loadTaskContext(env, true, t.id);
             const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx));
+            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx),principal);
             t.verify_readiness = enriched.readiness;
             t.collaboration = enriched.collaboration;
             t.host = enriched.workflow.host;
             t.plan = enriched.workflow.plan;
             t.goal = t.plan.goal;
+            if(enriched.workflow.discussion) t.discussion=enriched.workflow.discussion;
             t.report = enriched.workflow.outcomes[0]?.report || null;
+            const outcome = enriched.workflow.outcomes[0];
+            t.outcome_preview = outcome ? {summary: Array.from(outcome.summary || '').slice(0, 400).join(''), author: outcome.author, updated_at: outcome.created_at} : null;
           }));
         }
         const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
@@ -704,7 +721,8 @@ const businessWorker = {
       const b = await request.json().catch(() => ({}));
       if (!b.title) return err("缺少 title");
       const type = normalizeType(b.type) || "research";
-      if (b.type && !normalizeType(b.type)) return err("type 必須是 research / creative / debate / data");
+      if (b.type && !normalizeType(b.type)) return err("type 必須是 research / creative / debate / data / active_debate");
+      if (!useDb && (type==='active_debate'||b.plan?.goal==='active_debate')) return err('激辩需要 D1，请使用持久化测试环境',503);
       const now = new Date().toISOString();
       const isTest = principal.kind === "test";
       const isProposed = isTest
@@ -715,6 +733,7 @@ const businessWorker = {
       const status = isProposed ? "proposed" : "open";
       if (useDb) {
         const plan = newPlan(b.plan || {}, type);
+        if(b.type&&((type==='active_debate')!==isActiveDebate(plan))) return err('激辩的 type 与 plan.goal 须一致');
         await validatePlanAgents(env.DB, plan);
         const results = await env.DB.batch([
           env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, b.type?type:legacyType(plan.goal), now, now),
@@ -734,7 +753,7 @@ const businessWorker = {
       if (!ctx) return err("任務不存在", 404);
       const { task, challenges, supplements, debate, eventAgents, forceApprovals } = ctx;
       const readiness = computeReadiness(task, challenges, supplements, eventAgents, debate);
-      const enriched = useDb ? await decorateCollaboration(env.DB, task, ctx, readiness, computeCollaboration(task, readiness, ctx)) : { readiness, collaboration: computeCollaboration(task, readiness, ctx) };
+      const enriched = useDb ? await decorateCollaboration(env.DB, task, ctx, readiness, computeCollaboration(task, readiness, ctx),principal) : { readiness, collaboration: computeCollaboration(task, readiness, ctx) };
       if(enriched.workflow) {task.goal=enriched.workflow.plan.goal;task.plan=enriched.workflow.plan;}
       return json({ ok: true, task, plan:enriched.workflow?.plan, challenges, supplements, debate, verify_readiness: enriched.readiness, collaboration: enriched.collaboration, workflow: enriched.workflow, force_approvals: forceApprovals });
     }
@@ -782,6 +801,12 @@ const businessWorker = {
           if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
           if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
           const links = extractUrls(linksToString(b.links));
+          const plan=await readPlan(env.DB,cur);
+          if(isActiveDebate(plan)) {
+            const result=await postActiveDebate(env.DB,cur,plan,principal,b,stance,links);
+            if(!result.replayed) await recordDebateAward(env,true,principal,name,cur,speakerRole);
+            return json({ok:true,...result},result.replayed?200:201);
+          }
           if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
           if (replyTo != null) {
             const target = await env.DB.prepare("SELECT id FROM debate_messages WHERE id=? AND task_id=?").bind(Number(replyTo), id).first();
@@ -821,8 +846,9 @@ const businessWorker = {
         if (!cur) return err("任務不存在", 404);
         if (['claim','result','supplement'].includes(action)) {
           const plan=await readPlan(env.DB,cur),scheduled=scheduleState(plan);
+          if(isActiveDebate(plan)) return err('激辩无需认领；讨论期间使用 /debate，截止后通过 /outcomes 提交总结',409);
           if(!scheduled.ready) return err(scheduled.reason,409);
-          if(action==='result'&&plan.delivery.format==='web_report') return err(`此任务要求已发布的网页报告；请先在 MUSE 等平台发布，再通过 POST /api/tasks/${id}/outcomes 提交 report.url、report.revision 与最新 workflow.fingerprint，不能用纯文字代替报告。`);
+          if(action==='result'&&plan.delivery.format==='web_report') return err(`此任务要求已发布的网页报告；请先在你的发布环境发布（静态托管、博客、报告站等均可），再通过 POST /api/tasks/${id}/outcomes 提交 report.url、report.revision 与最新 workflow.fingerprint，不能用纯文字代替报告。`);
         }
 
         if (action === "claim") {
@@ -832,19 +858,21 @@ const businessWorker = {
           if (!Object.hasOwn(ROLES, role)) return err("role 必須是 researcher / checker / challenger / supplementer");
           const won = await env.DB.prepare("UPDATE tasks SET status='in_progress', claimed_by=?, claimed_role=?, updated_at=? WHERE id=? AND status='open'").bind(name, role, now, id).run();
           if (won.meta.changes !== 1) return err("任務已被其他 Agent 認領");
-          await recordEvent(env, true, name, "claim", id);
+          await taskAuditStatement(env.DB,id,principal,'task_claim',{actor_name:name,role},now).run();
+          await recordEvent(env, true, name, "claim", id, now);
         } else if (action === "result") {
           if (cur.status !== "in_progress") return err(`只能對進行中的任務交結果，現在是 ${cur.status}`);
           if (principal.kind === "agent" && cur.claimed_by !== name) return err("只有認領者能提交結果", 403);
           const links = linksToString(b.links ?? b.result_links);
           await env.DB.prepare("UPDATE tasks SET status='review', result_summary=?, result_links=?, updated_at=? WHERE id=?").bind(b.summary || b.result_summary || "", links, now, id).run();
-          await recordEvent(env, true, cur.claimed_by, "result", id);
+          await taskAuditStatement(env.DB,id,principal,'task_result',{actor_name:name,summary:b.summary||b.result_summary||'',links},now).run();
+          await recordEvent(env, true, cur.claimed_by, "result", id, now);
         } else if (action === "verify") {
           if (cur.status !== "review") return err(`只能核對待核對的任務，現在是 ${cur.status}`);
           // v0.2.1 審核門檻：三條全滿足才能通過；負責人可強制通過但須留一句話理由
           const ctx = await loadTaskContext(env, true, id);
           const legacyReadiness = computeReadiness(cur, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-          const enriched = await decorateCollaboration(env.DB, cur, ctx, legacyReadiness, computeCollaboration(cur, legacyReadiness, ctx));
+          const enriched = await decorateCollaboration(env.DB, cur, ctx, legacyReadiness, computeCollaboration(cur, legacyReadiness, ctx),principal);
           const readiness = enriched.readiness;
           let forced = false, forceReason = "";
           if (!readiness.ready) {
@@ -860,7 +888,7 @@ const businessWorker = {
             AND COALESCE((SELECT SUM(revision) FROM work_issues WHERE task_id=?),0)=?
             AND COALESCE(result_summary,'')=? AND COALESCE(result_links,'')=?`)
             .bind(now,id,id,enriched.workflow.outcomes[0]?.id||0,id,enriched.workflow.plan.revision,id,enriched.workflow.issues.length,id,enriched.workflow.issues.reduce((n,i)=>n+i.revision,0),cur.result_summary||'',cur.result_links||'');
-          const statements=[acceptStatement];
+          const statements=[acceptStatement,taskAuditStatement(env.DB,id,principal,'task_verify',{forced,reason:forceReason,outcome_id:enriched.workflow.outcomes[0]?.id||null,report_revision:enriched.workflow.outcomes[0]?.report?.revision||null},now,true)];
           if(forced) statements.push(env.DB.prepare('INSERT INTO force_approvals(task_id,agent,reason,created_at) SELECT ?,?,?,? WHERE changes()=1').bind(id,name,forceReason,now));
           statements.push(env.DB.prepare("INSERT INTO events(agent,type,task_id,points,created_at) SELECT ?,'verify',?,?,? WHERE changes()=1 AND ?<>''").bind(cur.claimed_by||'',id,POINTS.verify,now,cur.claimed_by||''));
           statements.push(...nextOccurrenceStatements(env.DB,cur,enriched.workflow.plan));
@@ -871,6 +899,7 @@ const businessWorker = {
           return json({ ok: true, task: t2, next_task_id:nextTaskId, verify_readiness: readiness, ...(forced ? { forced: true, force_reason: forceReason } : {}) });
         } else if (action === "reopen") {
           await env.DB.prepare("UPDATE tasks SET status='open', claimed_by=NULL, claimed_role=NULL, updated_at=? WHERE id=?").bind(now, id).run();
+          await taskAuditStatement(env.DB,id,principal,'task_reopen',{previous_status:cur.status,actor_name:name},now).run();
         } else if (action === "challenge") {
           if (cur.status !== "review" && cur.status !== "done") return err(`只能質疑待核對或已完成的任務，現在是 ${cur.status}`);
           if (principal.kind === "test" && !b.agent) return err("缺少 agent（質疑的 Agent 名字）");
@@ -902,10 +931,12 @@ const businessWorker = {
         } else if (action === "approve") {
           if (cur.status !== "proposed") return err(`只能審批待審批的提議，現在是 ${cur.status}`);
           await env.DB.prepare("UPDATE tasks SET status='open', updated_at=? WHERE id=?").bind(now, id).run();
-          await recordEvent(env, true, cur.proposed_by || cur.created_by, "propose_approved", id);
+          await taskAuditStatement(env.DB,id,principal,'task_approve',{previous_status:cur.status,actor_name:name},now).run();
+          await recordEvent(env, true, cur.proposed_by || cur.created_by, "propose_approved", id, now);
         } else if (action === "reject") {
           if (cur.status !== "proposed") return err(`只能駁回待審批的提議，現在是 ${cur.status}`);
           await env.DB.prepare("UPDATE tasks SET status='closed', updated_at=? WHERE id=?").bind(now, id).run();
+          await taskAuditStatement(env.DB,id,principal,'task_reject',{previous_status:cur.status,actor_name:name},now).run();
         }
         const t = await env.DB.prepare("SELECT * FROM tasks WHERE id=?").bind(id).first();
         return json({ ok: true, task: t });
@@ -1011,10 +1042,14 @@ const businessWorker = {
 };
 
 export default {
+  async scheduled(_controller, env) {
+    if (!await dbInit(env)) throw Error('D1 unavailable for Agent visit cleanup');
+    await pruneAgentVisits(env.DB);
+  },
   async fetch(request, env, ctx) {
     let response;
     try {response = await businessWorker.fetch(request, env, ctx);}
-    catch(error) {if(error instanceof PlanError) return err(error.message,error.status);throw error;}
+    catch(error) {if(error instanceof PlanError||error instanceof DebateError) return err(error.message,error.status);throw error;}
     const path = new URL(request.url).pathname;
     if (!env.DB || !response.ok || request.method === "OPTIONS" || !/^\/api\/(tasks|messages|leaderboard)(\/|$)/.test(path)) return response;
     const labels = await displayLabels(env.DB);

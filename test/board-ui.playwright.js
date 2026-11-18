@@ -43,19 +43,23 @@ async page => {
     return route.fulfill({ status: 404, body: "missing mock" });
   });
   await page.goto("http://127.0.0.1:8765/");
+  await page.locator('#navTasks').click();
   await page.locator("#taskList .task-item").first().waitFor();
+  // 发布任务是按需展开的表单：先展开再填写。
+  await page.locator("#createTaskBox > summary").click();
   const type = page.locator('#taskForm').getByLabel("任务目标",{exact:true});
   if (await type.inputValue() !== "research") throw Error("新任务默认类型应为调研");
-  if ((await type.locator("option").evaluateAll(options => options.map(o => o.value))).join(",") !== "research,analysis,content,build") throw Error("缺少任务目标选项");
+  if ((await type.locator("option").evaluateAll(options => options.map(o => o.value))).join(",") !== "research,analysis,content,build,active_debate") throw Error("缺少任务目标选项");
   if (!await page.locator("#taskList .task-item").first().getByText("内容创作").count()) throw Error("列表缺少创作目标标记");
   await page.locator("#taskList .task-item").first().click();
   await page.locator("#taskDetail h3").getByText("描写秋天的诗句").waitFor();
   if (!await page.locator("#taskDetail .task-type").getByText("内容创作").count()) throw Error("任务详情缺少创作目标标记");
+  await page.locator('#taskDetail').getByRole('tab',{name:/^核查/}).click();
   if (!await page.locator("#taskDetail .check.na").getByText("不适用").count()) throw Error("不适用的核对条件未标注");
-  if (!await page.getByRole("button", { name: "核对通过" }).isVisible()) throw Error("创意任务未显示核对通过");
+  if (!await page.getByRole("button", { name: "确认验收" }).isVisible()) throw Error("创意任务未显示确认验收");
   await page.locator("#taskList .task-item").nth(1).click();
   await page.locator("#taskDetail h3").getByText("旧任务").waitFor();
-  if (!await page.locator("#taskList .task-item").nth(1).getByText("待补位").count()) throw Error("任务列表缺少待补位标记");
+  if (!await page.locator("#taskList .task-item").nth(1).getByText("待协作").count()) throw Error("任务列表缺少待协作标记");
   if (!await page.locator("#taskDetail .collaboration-hint").getByText("建议 Agent：认领").count()) throw Error("任务详情缺少协作提示");
   if (!await page.locator("#taskDetail .task-type").getByText("调研").count()) throw Error("旧任务应默认显示调研");
   await type.selectOption("analysis");
@@ -64,19 +68,18 @@ async page => {
   await page.locator("#taskDetail h3").getByText("一条辩论任务").waitFor();
   if (created?.type !== "data" || created?.plan?.goal !== 'analysis') throw Error("发布请求中的独立目标或兼容类型错误");
   await page.locator("#taskList .task-item").first().click();
-  await page.locator("#taskDetail .link-card").getByText("詩歌來源", { exact: false }).waitFor({ timeout: 5000 });
-  if (!await page.locator("#messages .link-card").count()) throw Error("讨论链接没有卡片");
-  if (!await page.locator("#taskDetail .link-card").getByText("證據來源").count()) throw Error("证据链接没有卡片");
-  const source = page.locator('#taskDetail a.plain-link[href="https://example.com/poem"]');
-  if (!await source.count()) throw Error("带句末标点的 URL 应留在正文作为普通链接");
-  if (!await page.locator('#taskDetail a.link-card[href="https://example.com/poem"]').count()) throw Error("正文下方缺少预览卡片");
+  await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
+  const sources=page.locator('#detailPanel-outcome .outcome-links');
+  if(await sources.getAttribute('open')!==null) throw Error('来源没有默认折叠');
+  await sources.locator('summary').click();
+  const source = sources.locator('.source-notes a.plain-link[href="https://example.com/poem"]');
+  if (!await source.count()) throw Error("带句末标点的 URL 丢失");
   if (!await source.evaluate(a => a.nextSibling?.textContent?.startsWith("."))) throw Error("句号应紧跟正文中的链接");
   if (await source.getAttribute("rel") !== "noopener noreferrer" || await source.getAttribute("target") !== "_blank") throw Error("外部链接缺少安全属性");
   for (const url of ["fail", "down"]) {
-    const fallback = page.locator(`#taskDetail a[href="https://example.com/${url}"]`);
+    const fallback = sources.locator(`.source-list a[href="https://example.com/${url}"]`);
     if (!await fallback.count() || !await fallback.getAttribute("class").then(s => s.includes("plain-link"))) throw Error(`预览失败时 ${url} 没有普通链接`);
   }
-  if (await page.locator(".link-card img, .link-card script").count()) throw Error("预览数据被插入为 HTML");
-  if (previewCalls["https://example.com/poem"] !== 1) throw Error("同一 URL 应共享一次预览请求");
-  return { typeSelection: "passed", createdType: created.type, linkCards: "passed", previewCalls };
+  if (await page.locator('.link-card').count() || Object.keys(previewCalls).length) throw Error('仍然显示或请求大预览卡');
+  return { typeSelection: "passed", createdType: created.type, foldedSources: "passed", previewCalls };
 }

@@ -83,7 +83,8 @@ test('MUSE reports support a dedicated author, independent findings, revision an
   assert.equal((await f.request('POST',`/api/tasks/${id}/issues/${issue.data.id}/respond`,{text:'已统一图表单位，即将发布新版',evidence:[source]},f.worker.auth)).status,200);
   assert.equal((await publish(f,id,'v1')).status,409);
   assert.equal((await publish(f,id,'v2',f.worker.auth,{fingerprint:v1})).status,409);
-  assert.equal((await publish(f,id,'v2')).status,201);
+  const finalSummary='结论：新版已修正单位。'+ '依据与适用条件😀'.repeat(70) + '重要限制仍保留在完整成果中。';
+  assert.equal((await publish(f,id,'v2',f.worker.auth,{summary:finalSummary})).status,201);
   d=await detail(f,id);
   assert.equal(d.workflow.current_reviews.length,0);
   assert.equal(d.workflow.outcomes.length,2);
@@ -98,6 +99,11 @@ test('MUSE reports support a dedicated author, independent findings, revision an
   assert.equal((await f.request('POST',`/api/tasks/${id}/verify`,{},f.admin)).status,200);
   const list=(await f.request('GET','/api/tasks',undefined,f.admin)).data.tasks.find(t=>t.id===id);
   assert.equal(list.report.revision,'v2');assert.equal(list.goal,'analysis');
+  assert.equal(list.outcome_preview.summary,Array.from(finalSummary).slice(0,400).join(''));
+  assert.equal(list.outcome_preview.author,f.worker.name);
+  const current=(await detail(f,id)).workflow.outcomes[0];
+  assert.equal(current.summary,finalSummary);
+  assert.equal(list.outcome_preview.updated_at,current.created_at);
 });
 
 test('web report tasks reject legacy result submissions without changing content, status or awards',async()=>{

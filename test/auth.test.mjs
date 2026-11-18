@@ -31,11 +31,14 @@ function memoryD1() {
   };
 }
 
-function setup() {
+function setup({ legacyWrite = false } = {}) {
   const DB = memoryD1();
   const env = {
     DB, API_KEY: "old-shared-token", BOOTSTRAP_KEY: "bootstrap-token",
     BOARD_ORIGIN: "https://board.example.test", ALLOW_PUBLIC_READ: "false",
+    // The shared key is read-only unless a migration window is explicitly opened;
+    // legacy-write fixtures below opt in so they can keep testing other rules.
+    ...(legacyWrite ? { ALLOW_LEGACY_WRITE: "true" } : {}),
   };
   async function request(method, path, body, headers = {}) {
     const res = await worker.fetch(new Request(`https://whiteboard.example.test${path}`, {
@@ -247,7 +250,7 @@ test("display-name edits preserve identity, claims, scores and issued credential
 });
 
 test("display-name edits require admin session, validate inputs and avoid ambiguous attribution", async () => {
-  const { request } = setup();
+  const { request } = setup({ legacyWrite: true });
   const { cookie } = await owner(request);
   const admin = { Cookie: cookie, ...boardOrigin };
   const first = await request("POST", "/api/admin/agents", { username: "first", name: "Shared" }, admin);
@@ -327,7 +330,7 @@ test("agent collaboration queue surfaces claimed work and rewards one debate rep
 });
 
 test("dashboard and Agent debate stances accept simplified Chinese and documented aliases", async () => {
-  const { request } = setup();
+  const { request } = setup({ legacyWrite: true });
   const { cookie } = await owner(request);
   const human = { Cookie: cookie, ...boardOrigin };
   const rebuttal = await request("POST", "/api/tasks/1/debate", { stance: "反驳", content: "证据相反", links: ["https://example.org/evidence"] }, human);
@@ -342,7 +345,7 @@ test("dashboard and Agent debate stances accept simplified Chinese and documente
 });
 
 test("malformed role, stance and reserved Agent name cannot corrupt the leaderboard", async () => {
-  const { request } = setup();
+  const { request } = setup({ legacyWrite: true });
   const legacy = { Authorization: "Bearer old-shared-token" };
   assert.equal((await request("POST", "/api/tasks/1/claim", { agent: "Red", role: "toString" }, legacy)).status, 400);
   assert.equal((await request("POST", "/api/tasks/1/debate", { agent: "Red", stance: "toString", content: "reason" }, legacy)).status, 400);
@@ -355,7 +358,7 @@ test("malformed role, stance and reserved Agent name cannot corrupt the leaderbo
 });
 
 test("two concurrent claims can record only one winner", async () => {
-  const { request, DB } = setup();
+  const { request, DB } = setup({ legacyWrite: true });
   const legacy = { Authorization: "Bearer old-shared-token" };
   const results = await Promise.all([
     request("POST", "/api/tasks/1/claim", { agent: "Agent A" }, legacy),
