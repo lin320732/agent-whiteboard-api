@@ -35,7 +35,7 @@ const outcomeView = createOutcomeView({ node, linkedText, sources: readingUI.sou
 const workUI = createCollaborationUI({ api, node, linkedText, button, user: () => state.user, selectTask: openTask, onTopicOpen: revealTopic, notify, flash, onParticipants: authors => { planAuthors = authors; taskPlanEditor.setAuthors(authors); } });
 const guideUI = createAgentGuideUI({ api, node, button, markdown: readingUI.markdown, user: () => state.user, notify });
 const visitsUI = createAgentVisitsUI({api, node, user: () => state.user});
-const workbench = createWorkbench({node, button, openTask, openOutcome, showTasks: () => showView('tasks')});
+const workbench = createWorkbench({node, button, openTask, openOutcome, showTasks: status => { if (status != null) { $('statusFilter').value = status; renderTasks(); } showView('tasks'); }, showOutcomes: () => showView('outcomes')});
 
 function node(tag, value = "", className = "") {
   const element = document.createElement(tag);
@@ -119,6 +119,7 @@ function showView(name, { focusTab = false, record = true } = {}) {
   }
   state.view = name;
   $('workspaceMenu').open = false;
+  if (name !== 'tasks') { $('createTaskBox').open = false; $('createChannelBox').open = false; }
   for (const tab of navTabs) {
     const active = tab.dataset.view === name;
     tab.classList.toggle('active', active);
@@ -316,6 +317,8 @@ function showLogin() {
   workbench.render([], null, null);
   renderTasks();
   visible("workspace", false);
+  visible("primaryNav", false);
+  visible("topbarTools", false);
   visible("identity", false);
   visible("loginView", true);
   const issued = clear($("issuedSecrets"));
@@ -331,6 +334,8 @@ function showBoard(user) {
   } catch { $('taskSort').value = 'desc'; state.conversationSort = 'desc'; }
   $("signedInAs").textContent = `${user.name} · ${roleText[user.role] || user.role}`;
   visible("loginView", false);
+  visible("primaryNav", true);
+  visible("topbarTools", true);
   visible("identity", true);
   visible("workspace", true);
   visible("accountsMenu", user.role === "admin");
@@ -497,6 +502,13 @@ function renderChannels() {
     add(chips, chip);
   }
   if (!state.channels.length) add(chips, node("span", "暂无频道", "muted channel-empty"));
+  const select = $("communityChannelSelect");
+  if (select) {
+    select.replaceChildren(new Option("全部频道", ""));
+    for (const channel of state.channels) select.add(new Option(channel.name, String(channel.id)));
+    select.value = value;
+    select.hidden = !state.channels.length;
+  }
 }
 function setChannel(id) {
   saveNavigation();
@@ -620,7 +632,8 @@ function renderOutcomeReader(data) {
   const target = clear($("outcomeDetail"));
   target.classList.remove("empty");
   const head = node("div", null, "detail-head");
-  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"), node("h3", task.title));
+  const eyebrow = add(node("div", null, "detail-eyebrow"), node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"));
+  add(head, eyebrow, node("h3", task.title));
   add(target, head);
   add(target, outcomeView.summaryBlock(task, data, { heading: "成果总结" }));
   const original = originalSubmission(data);
@@ -847,12 +860,14 @@ function renderTaskDetail(data) {
   target.classList.remove("empty");
 
   const head = node("div", null, "detail-head");
-  add(head, node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"), node("h3", task.title));
+  const eyebrow = add(node("div", null, "detail-eyebrow"), node("span", taskStatus(task), `badge ${task.status}`), typeBadge(task), node("span", `任务 #${task.id}`, "record-id"));
+  add(head, eyebrow, node("h3", task.title));
   const meta = node("div", null, "task-meta");
   add(meta, node("span", data.workflow?.discussion?'参与：开放激辩，无需认领':`负责：${data.workflow?.host || task.claimed_by || '待认领'}`));
   if (task.deadline) add(meta, node('span', `截止：${task.deadline}`));
   add(head, meta);
-  add(head, node('p', nextStep(data), 'next-step'));
+  const stepTone = task.status === 'done' ? 'is-done' : data.workflow?.issues?.some(i => i.state === 'disputed') ? 'is-warn' : task.status === 'review' && data.verify_readiness?.ready ? 'is-ready' : task.status === 'proposed' || data.workflow?.waiting ? 'is-warn' : 'is-info';
+  add(head, node('p', nextStep(data), `next-step ${stepTone}`));
   add(target, head);
 
   const remembered = state.detailTab?.taskId === task.id ? state.detailTab.key : 'overview';
@@ -1103,6 +1118,18 @@ $('taskSort').addEventListener('change', () => {
   recordNavigation(true);
 });
 $("messageScopeAll").addEventListener("click", () => setChannel(""));
+$("communityChannelSelect")?.addEventListener("change", event => setChannel(event.currentTarget.value));
+document.addEventListener("click", event => {
+  const menu = $("workspaceMenu");
+  if (menu?.open && !menu.contains(event.target)) menu.open = false;
+});
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  for (const id of ["workspaceMenu", "createTaskBox", "createChannelBox"]) {
+    const el = $(id);
+    if (el?.open) el.open = false;
+  }
+});
 
 $("taskForm").addEventListener("submit", async event => {
   event.preventDefault(); const form = event.currentTarget, data = Object.fromEntries(new FormData(form));
@@ -1133,7 +1160,7 @@ for (const [formId, resource] of [["userForm", "users"], ["agentForm", "agents"]
 }
 async function startBoard(user) {
   const route = routeFromHash();
-  $('workspace').inert = true;
+  for (const id of ['workspace', 'primaryNav', 'topbarTools']) $(id).inert = true;
   $('workspace').setAttribute('aria-busy', 'true');
   showBoard(user);
   try {
@@ -1141,7 +1168,7 @@ async function startBoard(user) {
     if (state.user !== user) return;
     await restoreNavigation(route);
   } finally {
-    $('workspace').inert = false;
+    for (const id of ['workspace', 'primaryNav', 'topbarTools']) $(id).inert = false;
     $('workspace').removeAttribute('aria-busy');
     if (state.user === user) {historyReady = true; recordNavigation(true);}
   }

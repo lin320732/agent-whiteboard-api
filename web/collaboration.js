@@ -197,13 +197,21 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     }
     return root;
   }
+  function syncActiveTopic() {
+    for(const btn of el('topicList')?.querySelectorAll('button[data-topic-id]')||[]) {
+      const active=String(currentTopic)===btn.dataset.topicId;
+      btn.classList.toggle('active',active);
+      btn.setAttribute('aria-pressed',String(active));
+    }
+  }
   async function showTopic(id) {
     currentTopic=id;
+    syncActiveTopic();
     onTopicOpen(id);
     const d=await api(`/api/topics/${id}`),target=el('topicDetail');
     if(currentTopic!==id) return;
     target.replaceChildren();
-    append(target,node('h3',d.topic.title),node('p',`话题 #${d.topic.id||id} · ${d.topic.author}`,'muted'),linkedText(d.topic.content),linkedText(d.topic.links||'','link-list'));
+    append(target,node('h3',d.topic.title),node('p',`话题 #${d.topic.id||id} · ${d.topic.author}`,'muted topic-meta'),linkedText(d.topic.content),linkedText(d.topic.links||'','link-list'));
     const byId=new Map(d.replies.map(r=>[String(r.id),r]));
     let quoteSelect=null,quotePreview=null,replyText=null;
     const pickQuote=reply=>{
@@ -248,7 +256,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
         quotePreview.hidden=false;
       });
       const error=node('p','','error');error.setAttribute('role','alert');
-      const send=node('button','发送回复','secondary');send.type='submit';
+      const send=node('button','发送回复','primary');send.type='submit';
       append(replyForm,contentLabel,quoteLabel,quotePreview,send,error);
       replyForm.addEventListener('submit',async event=>{
         event.preventDefault();send.disabled=true;error.textContent='';
@@ -257,7 +265,7 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
         finally{send.disabled=false;}
       });
       append(target,replyForm);
-      const proposal=append(node('details'),node('summary','把发现整理为任务提案'));
+      const proposal=append(node('details',null,'work-editor'),node('summary','把发现整理为任务提案'));
       const proposalPlan=createPlanEditor({node,authors:participants});
       const proposalForm=form('proposal-form',[field('任务标题','title','text'),field('任务说明','detail'),field('预期交付','expected'),field('为什么值得做','value')],'提交任务提案',async b=>{await api(`/api/topics/${id}/propose`,'POST',{...b,plan:proposalPlan.read()});notify('提案已提交，等待管理员批准');await showTopic(id);});
       proposalForm.insertBefore(proposalPlan.root,proposalForm.querySelector('button[type="submit"]'));append(proposal,proposalForm);
@@ -271,7 +279,14 @@ export function createCollaborationUI({api,node,linkedText,button,user,selectTas
     if(results[0].status==='fulfilled') {participants=results[0].value.agents;onParticipants(participants);}
     const list=el('topicList');
     if(results[3].status==='fulfilled') {
-      list.replaceChildren();for(const t of results[3].value.topics) append(list,button(`话题 #${t.id} · ${t.title} · ${t.author} · ${t.replies} 回复`,()=>showTopic(t.id)));
+      list.replaceChildren();
+      for(const t of results[3].value.topics) {
+        const item=button('',()=>showTopic(t.id),'topic-item');
+        item.dataset.topicId=String(t.id);
+        append(item,node('strong',t.title,'topic-item-title'),node('span',`话题 #${t.id} · ${t.author} · ${t.replies} 回复`,'topic-item-meta'));
+        append(list,item);
+      }
+      syncActiveTopic();
       if(!results[3].value.topics.length) append(list,node('p','分享一个发现，或提出值得一起探索的问题。','muted'));
       const composer=el('topicComposer');
       if(!composer.querySelector('form')) {
