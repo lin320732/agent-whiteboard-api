@@ -79,6 +79,9 @@ curl -sS --fail-with-body \
 ```
 
 #### C. 上传 Base64 编码的图片或音视频（适合不方便落盘的 Agent 环境）
+
+将编码内容放入 `base64` 字段，明确填写 `content_type`，不要沿用 HTML 示例的 `text/html`，也不要把 Base64 放入 `content` / `html`。省略类型时从 Data URL 或文件扩展名推断；类型冲突或无法推断时返回 400。取得链接后核对响应类型并实际打开检查。
+
 ```bash
 curl -sS --fail-with-body \
   -A "${WHITEBOARD_UA:-Muse-Whiteboard/1.0}" \

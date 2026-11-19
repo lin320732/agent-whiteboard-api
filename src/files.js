@@ -111,25 +111,36 @@ function sanitizeFilename(raw, fallbackMime = 'text/html') {
   return cleaned;
 }
 
-function resolveContentType(rawType, filename) {
+function filenameContentType(filename) {
   const ext = String(filename || '').split('.').pop()?.toLowerCase() || '';
+  return Object.hasOwn(MIME_BY_EXT, ext) ? MIME_BY_EXT[ext] : '';
+}
+
+function isTextContentType(contentType) {
+  const mime = baseMime(contentType);
+  return mime.startsWith('text/') || mime === 'application/json' || mime === 'image/svg+xml';
+}
+
+function resolveContentType(rawType, filename) {
+  const inferredType = filenameContentType(filename);
   const mime = baseMime(rawType);
   if (mime && Object.hasOwn(EXT_BY_MIME, mime)) {
+    if (inferredType && baseMime(inferredType) !== mime) fail('声明的档案类型与文件扩展名不符，请使用对应的 content_type');
     return mime.startsWith('text/') || mime === 'application/json' ? `${mime}; charset=utf-8` : mime;
   }
-  if (ext && Object.hasOwn(MIME_BY_EXT, ext)) return MIME_BY_EXT[ext];
+  if (inferredType) return inferredType;
   fail('不支持的档案类型；支持 HTML、Markdown、TXT、JSON、CSV、图片（PNG/JPG/WebP/GIF/SVG/AVIF）、视频（MP4/WebM/MOV）、音频（MP3/WAV/OGG/M4A）与 PDF');
 }
 
 function maxBytesForMime(contentType) {
   const mime = baseMime(contentType);
-  if (mime.startsWith('text/') || mime === 'application/json' || mime === 'image/svg+xml') return MAX_TEXT_BYTES;
+  if (isTextContentType(contentType)) return MAX_TEXT_BYTES;
   if (mime.startsWith('image/')) return MAX_IMAGE_BYTES;
   return MAX_MEDIA_BYTES;
 }
 
 function decodeBase64(b64) {
-  const cleaned = String(b64 || '').replace(/^data:[^;]+;base64,/i, '').replace(/\s+/g, '');
+  const cleaned = String(b64 || '').trim().replace(/^data:[^,]*;base64,/i, '').replace(/\s+/g, '');
   if (!cleaned) fail('base64 内容不能为空');
   let binary;
   try {
@@ -255,15 +266,24 @@ async function parseUploadRequest(request, url, pathFilename = null) {
     if (!b || typeof b !== 'object' || Array.isArray(b)) fail('无效 JSON');
     const hasContent = typeof b.content === 'string' || typeof b.html === 'string' || typeof b.base64 === 'string';
     if (!hasContent) fail('请提供 content（或 html）文本，或 base64 编码内容');
-    const defaultMime = typeof b.html === 'string' ? 'text/html' : (b.content_type || 'text/html');
-    const filename = b.filename || queryName || (typeof b.html === 'string' ? 'report.html' : 'file.html');
-    const bytes = typeof b.base64 === 'string'
+    const isBase64 = typeof b.base64 === 'string';
+    const isHtml = typeof b.html === 'string';
+    const filename = b.filename || queryName || (isHtml ? 'report.html' : 'file');
+    const dataUrlType = isBase64 ? /^data:([^;,]+)(?:;[^,]*)?;base64,/i.exec(b.base64.trim())?.[1] : '';
+    if (b.content_type && dataUrlType && baseMime(b.content_type) !== baseMime(dataUrlType)) fail('声明的档案类型与 Data URL 类型不符，请使用对应的 content_type');
+    // application/json describes the envelope. Resolve the file's own MIME before
+    // naming it or applying size limits; Base64 media must never default to HTML.
+    const contentType = b.content_type || dataUrlType || (isHtml ? 'text/html' : filenameContentType(filename)) || (isBase64 ? '' : 'text/html');
+    if (isBase64 && !contentType) fail('base64 档案须提供 content_type、带类型的 Data URL 或可识别的文件扩展名');
+    const resolvedType = resolveContentType(contentType, filename);
+    if (!isBase64 && !isTextContentType(resolvedType)) fail('二进制档案请使用 base64 字段或二进制直传，不能放在 content/html 文本字段');
+    const bytes = isBase64
       ? decodeBase64(b.base64)
-      : new TextEncoder().encode(typeof b.html === 'string' ? b.html : b.content);
+      : new TextEncoder().encode(isHtml ? b.html : b.content);
     return {
       filename,
       title: b.title || queryTitle || '',
-      contentType: defaultMime,
+      contentType: resolvedType,
       bytes,
       taskId: b.task_id ?? b.taskId ?? queryTaskId,
       scope: b.scope ?? queryScope,
@@ -305,7 +325,7 @@ async function serveFile(request, env, id, requestedName) {
 
   if (url.searchParams.get('format') === 'json') {
     if (!row) row = await env.DB.prepare('SELECT * FROM stored_files WHERE id=?').bind(id).first();
-    const isText = mime.startsWith('text/') || mime === 'application/json' || mime === 'image/svg+xml';
+    const isText = isTextContentType(contentType);
     const textContent = isText && request.method === 'GET'
       ? new TextDecoder().decode(await object.arrayBuffer())
       : null;

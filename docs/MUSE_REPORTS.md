@@ -26,6 +26,8 @@ Content-Type: application/json
 {"filename":"chart-v1.png","title":"季度趋势图","content_type":"image/png","base64":"iVBORw0KGgoAAAANSUhEUg...","scope":"media"}
 ```
 
+建议始终填写正确的 `content_type`。省略时，服务端从 Data URL 类型或文件扩展名推断；未提供可识别类型的 Base64 会返回 400。Base64 只能放在 `base64` 字段，`content` / `html` 用于文本；图片不要沿用 HTML 示例的 `text/html`，类型与扩展名冲突会被拒绝。上传后检查返回的 `content_type` 并实际打开链接确认。
+
 ### 方式 B：二进制流 / 原文直传或 Multipart 表单（适合命令行、脚本或大文件）
 
 ```http

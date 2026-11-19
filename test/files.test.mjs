@@ -4,6 +4,58 @@ import { readFileSync } from 'node:fs';
 import worker from '../src/index.js';
 import { fixture } from './helpers.mjs';
 
+test('JSON media uploads infer MIME from filename or Data URL without defaulting to HTML', async () => {
+  const f = await fixture();
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNIWPDgPwAGJALgx/BMsgAAAABJRU5ErkJggg==', 'base64');
+  const cases = [
+    { body: { filename: 'castle.png', base64: png.toString('base64') }, filename: 'castle.png', mime: 'image/png', bytes: png },
+    { body: { filename: 'castle.png', base64: `data:image/png;base64,${png.toString('base64')}` }, filename: 'castle.png', mime: 'image/png', bytes: png },
+    { body: { base64: `data:image/png;charset=utf-8;base64,${png.toString('base64')}` }, filename: 'file.png', mime: 'image/png', bytes: png },
+    { body: { filename: 'castle', content_type: 'image/png', base64: png.toString('base64') }, filename: 'castle.png', mime: 'image/png', bytes: png },
+    { body: { filename: 'data.csv', content: 'name,value\ncastle,1' }, filename: 'data.csv', mime: 'text/csv; charset=utf-8', bytes: Buffer.from('name,value\ncastle,1') },
+    { body: { content: '<h1>Legacy report</h1>' }, filename: 'file.html', mime: 'text/html; charset=utf-8', bytes: Buffer.from('<h1>Legacy report</h1>') },
+  ];
+  for (const { body, filename, mime, bytes } of cases) {
+    const uploaded = await f.request('POST', '/api/files', body, f.worker.auth);
+    assert.equal(uploaded.status, 201, JSON.stringify(uploaded.data));
+    assert.equal(uploaded.data.filename, filename);
+    assert.equal(uploaded.data.content_type, mime);
+    const object = f.FILES.store.get(`files/${uploaded.data.id}/${filename}`);
+    assert.equal(object.httpMetadata.contentType, mime);
+    const row = f.DB.sqlite.prepare('SELECT content_type FROM stored_files WHERE id=?').get(uploaded.data.id);
+    assert.equal(row.content_type, mime);
+    const response = await worker.fetch(new Request(uploaded.data.url), f.env, {});
+    assert.equal(response.headers.get('Content-Type'), mime);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
+    if (mime === 'image/png') {
+      assert.equal(response.headers.get('Content-Security-Policy'), null);
+      const head = await worker.fetch(new Request(uploaded.data.url, { method: 'HEAD' }), f.env, {});
+      assert.equal(head.headers.get('Content-Type'), mime);
+      assert.equal(await head.text(), '');
+      const metadata = await (await worker.fetch(new Request(uploaded.data.url + '?format=json'), f.env, {})).json();
+      assert.equal(metadata.file.content_type, mime);
+      assert.equal(Object.hasOwn(metadata.file, 'content'), false);
+    }
+  }
+});
+
+test('JSON binary uploads require base64 and reject untyped or conflicting media before storing', async () => {
+  const f = await fixture();
+  for (const body of [
+    { base64: 'aGVsbG8=' },
+    { filename: 'castle.png', content: 'iVBORw0KGgoAAAANSUhEUg==' },
+    { filename: 'clip.mp4', content_type: 'video/mp4', content: 'AAAA' },
+    { filename: 'castle.png', content_type: 'text/html', base64: 'aGVsbG8=' },
+    { content_type: 'text/html', base64: 'data:image/png;base64,aGVsbG8=' },
+  ]) {
+    const response = await f.request('POST', '/api/files', body, f.worker.auth);
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match(response.data.error, /base64|类型/);
+  }
+  assert.equal(f.FILES.store.size, 0);
+  assert.equal(f.DB.sqlite.prepare('SELECT COUNT(*) AS n FROM stored_files').get().n, 0);
+});
+
 test('general R2 file hosting supports JSON HTML, binary image/video, capability URLs and zero-D1-read serving', async () => {
   const f = await fixture();
 
