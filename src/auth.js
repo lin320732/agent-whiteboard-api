@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS principal_labels (
   principal_id INTEGER PRIMARY KEY,
   display_name TEXT NOT NULL
-);`;
+);
+CREATE INDEX IF NOT EXISTS principals_name_kind ON principals(name,kind);`;
 
 export async function initAuthSchema(db) {
   // D1's Worker exec parses one SQL statement per line; flatten each DDL first.

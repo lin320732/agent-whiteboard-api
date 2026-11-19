@@ -538,9 +538,15 @@ function buildLeaderboard(eventRows) {
 // Attribution stays under the original actor name in D1. Only response labels change.
 async function displayLabels(db) {
   const rows = await db.prepare(`SELECT p.name AS actor, l.display_name
-    FROM principal_labels l JOIN principals p ON p.id=l.principal_id
-    WHERE (SELECT COUNT(*) FROM principals other WHERE other.name=p.name)=1`).all();
-  return new Map(rows.results.map(row => [row.actor, row.display_name]));
+    FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`).all();
+  const names = new Map();
+  for (const row of rows.results) {
+    const match = names.get(row.actor);
+    if (match) match.count++;
+    else names.set(row.actor, {count: 1, label: row.display_name});
+  }
+  return new Map([...names].filter(([, value]) => value.count === 1 && value.label != null)
+    .map(([actor, value]) => [actor, value.label]));
 }
 function projectDisplayNames(data, labels) {
   const display = value => typeof value === "string" ? labels.get(value) || value : value;
