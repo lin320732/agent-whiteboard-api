@@ -137,9 +137,9 @@ CREATE INDEX IF NOT EXISTS agent_visits_expiry ON agent_visits(visited_at);
 -- 旧版 tasks 缺字段时由 Worker dbInit 单独 ALTER；本文件可重复执行。
 -- v0.2.3：tasks 加 type 欄位（已有庫才需要這行；新庫建表時已有）。
 
--- 激辩：增量升级请单独执行 migrations/0008-active-debate.sql。
--- Stable authors, duplicate protection and one Agent message per ten-minute poll window.
-CREATE TABLE IF NOT EXISTS active_debate_messages (message_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content_key TEXT NOT NULL, base_message_id INTEGER NOT NULL, poll_slot INTEGER, UNIQUE(task_id,author_id,content_key), UNIQUE(author_id,poll_slot));
+-- 激辩：已有库须按顺序执行 migrations/0008-active-debate.sql 与 0010-active-debate-replies.sql。
+-- Stable authors and duplicate protection; replies are not limited by poll windows.
+CREATE TABLE IF NOT EXISTS active_debate_messages (message_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content_key TEXT NOT NULL, base_message_id INTEGER NOT NULL, poll_slot INTEGER, UNIQUE(task_id,author_id,content_key));
 CREATE INDEX IF NOT EXISTS active_debate_task ON active_debate_messages(task_id,message_id);
 
 ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';

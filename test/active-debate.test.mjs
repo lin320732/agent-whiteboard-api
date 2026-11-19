@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {DatabaseSync} from 'node:sqlite';
 import {fixture} from './helpers.mjs';
-import {ACTIVE_DEBATE_SCHEMA,debateProgress} from '../src/active-debate.js';
+import {debateProgress} from '../src/active-debate.js';
 
 async function setup(t,extra={}) {
   let at=Date.now();t.mock.method(Date,'now',()=>at);
@@ -22,6 +23,7 @@ async function setup(t,extra={}) {
 test('adopted history with no recorded creation time remains readable without inventing activity',()=>{
   const at=Date.now(),progress=debateProgress({status:'open'},{schedule:{end_at:new Date(at+3600000).toISOString()}},[],at);
   assert.equal(progress.last_activity_at,null);assert.equal(progress.phase,'active');assert.equal(progress.rounds,0);
+  assert.equal(progress.poll_after_seconds,300);assert.equal('per_poll_limit' in progress,false);
   assert.equal(Date.parse(progress.cold_at)-at,1800000);
 });
 
@@ -44,11 +46,11 @@ test('unclaimed discussion invites everyone, prioritizes direct replies and pres
   const f=await setup(t);
   assert.equal((await f.inbox()).items.find(i=>i.task_id===f.id).kind,'active_debate');
   const first=await f.say(f.worker,'我主张先公开论证假设，再讨论结论是否成立。');assert.equal(first.status,201);
-  assert.equal((await f.say(f.worker,'同一轮再补一条内容')).status,429);
+  assert.equal((await f.say(f.worker,'没有新内容时再补一条')).status,429);
   const second=await f.say(f.checker,'这个前提忽略了实际成本，需要先回答投入如何衡量。','反駁',first.data.message.id);assert.equal(second.status,201);
   const other=await f.request('POST','/api/tasks',{title:'另一个激辩',type:'active_debate',plan:{schedule:{end_at:f.end}}},f.admin);
   f.advance();
-  const pending=await f.inbox();assert.equal(pending.poll_after_seconds,600);
+  const pending=await f.inbox();assert.equal(pending.poll_after_seconds,300);
   assert.equal(pending.items.filter(i=>i.kind==='active_debate')[0].task_id,f.id);
   assert.equal((await f.request('POST',`/api/tasks/${other.data.id}/debate`,{content:'引用另一场讨论的发言。',stance:'支持',reply_to:first.data.message.id,expected_latest_id:0},f.worker.auth)).status,400);
   let turn=(await f.inbox()).items.find(i=>i.task_id===f.id);
@@ -64,7 +66,7 @@ test('unclaimed discussion invites everyone, prioritizes direct replies and pres
   turn=(await f.inbox(f.host)).items.find(i=>i.task_id===f.id);assert.equal(turn.action,'enter');
 });
 
-test('optimistic discussion writes, retries, content deduplication and global per-poll limits are atomic',async t=>{
+test('optimistic writes and retries remain safe while one Agent can post to separate tasks concurrently',async t=>{
   const f=await setup(t),path=`/api/tasks/${f.id}/debate`,body={stance:'支持',content:'先列出可证伪的主张，再用不同情境检验它。',expected_latest_id:0};
   const replies=await Promise.all([f.request('POST',path,body,f.worker.auth),f.request('POST',path,{...body,content:'我更看重公开讨论中对少数观点的充分回应。'},f.checker.auth)]);
   assert.deepEqual(replies.map(r=>r.status).sort(),[201,409]);
@@ -74,11 +76,33 @@ test('optimistic discussion writes, retries, content deduplication and global pe
   assert.equal((await f.request('POST',path,{...chosen,stance:'補充'},winner.auth)).status,409);
   assert.equal(f.DB.sqlite.prepare('SELECT COUNT(*) n FROM debate_messages WHERE task_id=?').get(f.id).n,1);
   const next=await f.request('POST','/api/tasks',{title:'另一场',type:'active_debate',plan:{schedule:{end_at:f.end}}},f.admin);
-  assert.equal((await f.request('POST',`/api/tasks/${next.data.id}/debate`,{...body,content:'在另一场激辩中追加发言。'},winner.auth)).status,429);
-  assert.ok((await f.inbox(winner)).waiting.some(i=>i.task_id===next.data.id&&i.action==='wait'));
+  const third=await f.request('POST','/api/tasks',{title:'第三场',type:'active_debate',plan:{schedule:{end_at:f.end}}},f.admin);
+  const due=(await f.inbox(winner)).items.filter(i=>[next.data.id,third.data.id].includes(i.task_id));
+  assert.equal(due.length,2);assert.ok(due.every(i=>i.action==='enter'));
+  const concurrent=await Promise.all([
+    f.request('POST',`/api/tasks/${next.data.id}/debate`,{...body,content:'在另一场激辩中给出独立观点。'},winner.auth),
+    f.request('POST',`/api/tasks/${third.data.id}/debate`,{...body,content:'在第三场激辩中给出独立观点。'},winner.auth),
+  ]);
+  assert.deepEqual(concurrent.map(r=>r.status),[201,201]);
   f.advance(1800000);
   const duplicate=await f.request('POST',path,{...chosen,expected_latest_id:retry.data.message.id},winner.auth);assert.equal(duplicate.status,409);
-  assert.equal(f.DB.sqlite.prepare('SELECT COUNT(*) n FROM active_debate_messages').get().n,1);
+  assert.equal(f.DB.sqlite.prepare('SELECT COUNT(*) n FROM active_debate_messages').get().n,3);
+});
+
+test('one Agent can answer every direct reply in the same task without waiting for another poll',async t=>{
+  const f=await setup(t);
+  const first=await f.say(f.worker,'先明确讨论中的核心假设。');assert.equal(first.status,201);
+  const fromChecker=await f.say(f.checker,'我质疑这个假设忽略了成本。','反駁',first.data.message.id);
+  const fromHost=await f.say(f.host,'我还想追问适用的时间范围。','反駁',first.data.message.id);
+  assert.equal(fromChecker.status,201);assert.equal(fromHost.status,201);
+  let pending=(await f.inbox()).items.find(i=>i.task_id===f.id);
+  assert.deepEqual(pending.pending_reply_ids,[fromChecker.data.message.id,fromHost.data.message.id]);
+  assert.equal((await f.say(f.worker,'成本应按可验证的投入来算。','補充',fromChecker.data.message.id)).status,201);
+  pending=(await f.inbox()).items.find(i=>i.task_id===f.id);
+  assert.deepEqual(pending.pending_reply_ids,[fromHost.data.message.id]);
+  assert.equal((await f.say(f.worker,'时间范围应覆盖整个执行周期。','補充',fromHost.data.message.id)).status,201);
+  assert.ok((await f.inbox()).waiting.some(i=>i.task_id===f.id));
+  assert.equal((await f.say(f.worker,'没有新回复时继续发言')).status,429);
 });
 
 test('thirty minutes of inactivity creates an icebreaker turn, and stale simultaneous icebreakers cannot both land',async t=>{
@@ -165,14 +189,37 @@ test('extending the deadline resumes discussion and invalidates an earlier summa
   assert.equal((await f.say(f.checker,'我来反驳原来的假设，补充一个边界情境。','反駁',d.debate[0].id)).status,201);
 });
 
-test('topic proposals retain active-debate plans and migration is additive and repeatable',async()=>{
+test('topic proposals retain active-debate plans and earlier migration remains repeatable',async()=>{
   const f=await fixture(),end_at=new Date(Date.now()+86400000).toISOString();
   const topic=await f.request('POST','/api/topics',{theme:'tools',title:'工具是否值得订阅',content:'欢迎提出不同观点'},f.worker.auth);
   const proposal=await f.request('POST',`/api/topics/${topic.data.id}/propose`,{title:'订阅激辩',detail:'来回讨论',expected:'观点与分歧总结',value:'比较不同使用情境',type:'active_debate',plan:{schedule:{end_at}}},f.worker.auth);
   assert.equal(proposal.status,201);assert.equal(proposal.data.status,'proposed');
   const d=(await f.request('GET',`/api/tasks/${proposal.data.id}`,undefined,f.admin)).data;assert.equal(d.plan.goal,'active_debate');
   const old=f.DB.sqlite.prepare('SELECT * FROM tasks').all(),sql=readFileSync(new URL('../migrations/0008-active-debate.sql',import.meta.url),'utf8');
-  const normalized=s=>s.replace(/--[^\n]*/g,'').split(';').map(x=>x.trim()).filter(Boolean);
-  assert.deepEqual(normalized(sql),normalized(ACTIVE_DEBATE_SCHEMA));
   f.DB.sqlite.exec(sql);f.DB.sqlite.exec(sql);assert.deepEqual(f.DB.sqlite.prepare('SELECT * FROM tasks').all(),old);
+});
+
+test('reply migration removes the old time-window constraint and preserves history on repeat',()=>{
+  const db=new DatabaseSync(':memory:');
+  db.exec(readFileSync(new URL('../migrations/0008-active-debate.sql',import.meta.url),'utf8'));
+  db.prepare('INSERT INTO active_debate_messages(message_id,task_id,author_id,content_key,base_message_id,poll_slot) VALUES (?,?,?,?,?,?)').run(41,17,7,'existing-message',0,123);
+  const migration=readFileSync(new URL('../migrations/0010-active-debate-replies.sql',import.meta.url),'utf8');
+  db.exec(migration);db.exec(migration);
+  assert.deepEqual(db.prepare('SELECT message_id,task_id,author_id,content_key,base_message_id,poll_slot FROM active_debate_messages').all().map(row=>({...row})),[{message_id:41,task_id:17,author_id:7,content_key:'existing-message',base_message_id:0,poll_slot:123}]);
+  db.prepare('INSERT INTO active_debate_messages(message_id,task_id,author_id,content_key,base_message_id,poll_slot) VALUES (?,?,?,?,?,?)').run(42,18,7,'another-task',0,123);
+  assert.throws(()=>db.prepare('INSERT INTO active_debate_messages(message_id,task_id,author_id,content_key,base_message_id) VALUES (?,?,?,?,?)').run(43,17,7,'existing-message',41),/UNIQUE constraint/);
+  db.close();
+});
+
+test('new posting code accepts concurrent task posts before the old table is migrated',async t=>{
+  const f=await setup(t),db=f.DB.sqlite;
+  db.exec('DROP TABLE active_debate_messages');
+  db.exec(readFileSync(new URL('../migrations/0008-active-debate.sql',import.meta.url),'utf8'));
+  const other=await f.request('POST','/api/tasks',{title:'旧库中的第二场激辩',type:'active_debate',plan:{schedule:{end_at:f.end}}},f.admin);
+  const posted=await Promise.all([
+    f.request('POST',`/api/tasks/${f.id}/debate`,{stance:'支持',content:'第一场的独立观点。',expected_latest_id:0},f.worker.auth),
+    f.request('POST',`/api/tasks/${other.data.id}/debate`,{stance:'支持',content:'第二场的独立观点。',expected_latest_id:0},f.worker.auth),
+  ]);
+  assert.deepEqual(posted.map(r=>r.status),[201,201]);
+  assert.deepEqual(db.prepare('SELECT poll_slot FROM active_debate_messages ORDER BY message_id').all().map(row=>row.poll_slot),[null,null]);
 });

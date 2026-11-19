@@ -2,7 +2,7 @@ import { hashSecret, originAllowed, permit } from './auth.js';
 import { GUIDE_DISCOVERY } from './agent-guide.js';
 import { readPlan, normalizePlan, savePlan, scheduleState, normalizeReport } from './task-plan.js';
 import { readTaskActivity } from './task-activity.js';
-import { isActiveDebate, discussionContext, personalDebateTurn, DEBATE_POLL_SECONDS } from './active-debate.js';
+import { isActiveDebate, discussionContext, debateTurn, DEBATE_POLL_SECONDS } from './active-debate.js';
 
 export class WorkError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
@@ -92,7 +92,7 @@ export async function decorateCollaboration(db, task, context, readiness, collab
   const check=(key,label,met,detail)=>({key,label,met,detail});
   if(work.discussion) {
     const d=work.discussion,summary=d.has_summary?work.outcomes[0]?.summary||'':'';
-    d.next_action=await personalDebateTurn(db,d,d.messages,principal,d.summary_author_id,!!summary);
+    d.next_action=debateTurn(d,d.messages,principal,d.summary_author_id,!!summary);
     delete d.messages;
     const checks=[check('deadline','已到讨论截止时间',d.phase==='ended'||d.phase==='done','持续讨论至 '+d.end_at),
       check('agents','至少两位 Agent 发言',d.participants>=2,`已有 ${d.participants} 位 Agent`),
@@ -159,7 +159,7 @@ async function inbox(db,p) {
     const missingReport=w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report;
     const base={task_id:t.id,title:t.title};
     if(w.discussion) {
-      const d=w.discussion,turn=await personalDebateTurn(db,d,d.messages,p,d.summary_author_id,d.has_summary);
+      const d=w.discussion,turn=debateTurn(d,d.messages,p,d.summary_author_id,d.has_summary);
       if(agent(p)&&turn?.kind!=='wait') items.push({...base,...turn,kind:'active_debate',action:turn?.kind,expected_latest_id:d.last_message_id,end_at:d.end_at});
       else if(admin(p)&&d.phase==='ended') items.push({...base,kind:'active_debate',action:turn?.kind==='summarize'?'summarize':'decide',reason:d.participation_sufficient?'激辩已截止，请检查总结与验收条件':'激辩已截止，参与不足；请决定关闭或调整截止时间'});
       else if(turn?.kind==='wait') waiting.push({...base,...turn,kind:'active_debate',action:'wait'});
