@@ -30,6 +30,10 @@ binding = "DB"
 database_name = "agent-whiteboard"
 database_id = "7d01837a-0212-42f8-9598-93e3e0f773bb"
 
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "agent-whiteboard-files"
+
 # Token 不要寫在這裡。部署後執行：
 #   wrangler secret put API_KEY
 # 然後把同一個 Token 發給要接入的 Agent。

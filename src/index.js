@@ -7,6 +7,7 @@ import { TASK_PLAN_SCHEMA, initTaskPlans, newPlan, planInsert, validatePlanAgent
 import { taskAuditStatement } from './task-activity.js';
 import { AGENT_VISITS_SCHEMA, initAgentVisits, recordAgentVisit, pruneAgentVisits } from './agent-visits.js';
 import { ACTIVE_DEBATE_SCHEMA, initActiveDebate, isActiveDebate, postActiveDebate, DebateError } from './active-debate.js';
+import { FILES_SCHEMA, initFilesSchema, filesRoute, FileError } from './files.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -442,7 +443,7 @@ const CORE_SCHEMA = `CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY
   CREATE INDEX IF NOT EXISTS debate_messages_task ON debate_messages(task_id);
   CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id);`;
 // Derive the probe from the same DDL as migrations, so new tables cannot be skipped.
-const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, ACTIVE_DEBATE_SCHEMA].join('\n')
+const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, ACTIVE_DEBATE_SCHEMA, FILES_SCHEMA].join('\n')
   .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)]
   .map(match => ({ type: match[1].toLowerCase(), name: match[2] }));
 const initializedDbs = new WeakSet();
@@ -479,6 +480,7 @@ async function initializeDatabase(env) {
   await initTaskPlans(env.DB);
   await initAgentGuide(env.DB);
   await initActiveDebate(env.DB);
+  await initFilesSchema(env.DB);
   const c = await env.DB.prepare("SELECT COUNT(*) AS n FROM channels").first();
   if (c && c.n === 0) {
     const now = new Date().toISOString();
@@ -598,6 +600,7 @@ function routeAction(method, path) {
 const ENDPOINTS = [
   "GET /api/admin/agents/:id/visits",
   "GET /api/agent-guide", "POST /api/admin/agent-guide",
+  "GET /api/files", "POST /api/files", "PUT /api/files/:filename", "GET /api/files/:id/:filename", "DELETE /api/files/:id",
   "GET /api/channels", "POST /api/channels",
   "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "POST /api/tasks",
   "GET /api/tasks/:id", "POST /api/tasks/:id/claim", "POST /api/tasks/:id/result",
@@ -642,6 +645,8 @@ const businessWorker = {
       if (guideResponse) return guideResponse;
       const handled = await authRoute(request, env, principal, path);
       if (handled) return handled;
+      const filesResponse = await filesRoute(request, env, principal, path);
+      if (filesResponse) return filesResponse;
       const workResponse = await collaborationRoute(request, env, principal, path);
       if (workResponse) return workResponse;
       const communityResponse = await communityRoute(request, env, principal, path);
@@ -1066,7 +1071,7 @@ export default {
   async fetch(request, env, ctx) {
     let response;
     try {response = await businessWorker.fetch(request, env, ctx);}
-    catch(error) {if(error instanceof PlanError||error instanceof DebateError) return err(error.message,error.status);throw error;}
+    catch(error) {if(error instanceof PlanError||error instanceof DebateError||error instanceof FileError) return err(error.message,error.status);throw error;}
     const path = new URL(request.url).pathname;
     if (!env.DB || !response.ok || request.method === "OPTIONS" || !/^\/api\/(tasks|messages|leaderboard)(\/|$)/.test(path)) return response;
     const labels = await displayLabels(env.DB);

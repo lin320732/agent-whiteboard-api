@@ -3,6 +3,7 @@ import { GUIDE_DISCOVERY } from './agent-guide.js';
 import { readPlan, normalizePlan, savePlan, scheduleState, normalizeReport } from './task-plan.js';
 import { readTaskActivity } from './task-activity.js';
 import { isActiveDebate, discussionContext, debateTurn, DEBATE_POLL_SECONDS } from './active-debate.js';
+import { storeUploadedFile } from './files.js';
 
 export class WorkError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
@@ -180,7 +181,7 @@ async function inbox(db,p) {
       if(w.host_id===p.id||i.author_id===p.id||admin(p)||((responsible||t.claimed_by===p.name)&&i.state==='open')) items.push({...base,kind:'issue',issue_id:i.id,reason:i.text,state:i.state});
     }
     if(agent(p)&&w.report_author_id===p.id) {
-      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',reason:`先制作并发布网页报告，再通过 POST /api/tasks/${t.id}/outcomes 提交 report.url、report.revision 与当前 workflow.fingerprint`});
+      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',reason:`先制作网页报告（可直接通过 POST /api/files 上传 HTML 档案，或在 POST /api/tasks/${t.id}/outcomes 的 report.html 中直接提交 HTML 内容），再提交 report.revision 与当前 workflow.fingerprint`});
       else if(!w.issues.some(i=>i.state==='open')) waiting.push({...base,kind:'report_review',resume_at:null,reason:w.blocking?'报告问题已回应，等待他人确认':w.plan.acceptance.independent_review&&!w.current_reviews.length?'报告已登记，等待独立核查':'报告已交付，等待用户确认'});
     }
     if(agent(p)&&w.enabled&&!missingReport&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示':'请独立核查当前成果'});
@@ -266,16 +267,32 @@ export async function collaborationRoute(request, env, principal, path) {
     if(kind==='outcomes') {
       if(w.discussion&&w.discussion.phase!=='ended') fail('激辩持续到截止时间，之后才提交总结',409);
       if(w.discussion&&b.fingerprint!==w.fingerprint) fail('讨论或总结已更新，请重读后再提交',409);
-      const report=b.report==null?null:normalizeReport(b.report);
-      const reportTask=w.plan.delivery.format==='web_report'||!!report;
+      const reportTask=w.plan.delivery.format==='web_report'||b.report!=null;
       const permitted=admin(p)||(agent(p)&&(w.discussion?p.id===w.discussion.summary_author_id:reportTask&&w.report_author_id?p.id===w.report_author_id:hostAllowed(p,w)||(!w.host_id&&task.claimed_by===p.name)));
       if(!w.enabled||!permitted) fail('由管理员、主持人或指定的主要作者提交成果',403);
-      if(w.plan.delivery.format==='web_report'&&!report) fail('请先发布网页报告，并提交 report.url 与 report.revision');
-      if((report||b.fingerprint!=null)&&b.fingerprint!==w.fingerprint) fail('成果已更新，请重读后再发布当前版本',409);
-      if(report&&w.outcomes.some(o=>o.report?.url===report.url&&o.report?.revision===report.revision)) fail('同一报告链接的修改须使用新的发布版本',409);
+      if((b.report!=null||b.fingerprint!=null)&&b.fingerprint!==w.fingerprint) fail('成果已更新，请重读后再发布当前版本',409);
       const summary=text(b.summary),urls=links(b.links),changes=text(b.changes,2000),refs=b.source_refs??[];
       if(!Array.isArray(refs)||refs.length>50) fail('来源引用最多 50 条');
       const sources=[];for(const ref of refs) sources.push(await sourceRef(db,taskId,ref));
+      let rawReport=b.report;
+      let hostedFile=null;
+      if(rawReport&&typeof rawReport==='object'&&!Array.isArray(rawReport)&&(typeof rawReport.html==='string'||typeof rawReport.content==='string')) {
+        const inlineHtml=typeof rawReport.html==='string'?rawReport.html:rawReport.content;
+        const revSlug=String(rawReport.revision||'v1').trim().replace(/[^a-zA-Z0-9._-]+/g,'-')||'v1';
+        hostedFile=await storeUploadedFile(env,p,request.url,{
+          filename:rawReport.filename||`task-${taskId}-${revSlug}.html`,
+          title:rawReport.title||task.title||'网页报告',
+          contentType:rawReport.content_type||'text/html',
+          bytes:new TextEncoder().encode(inlineHtml),
+          taskId,
+          scope:'report',
+        });
+        rawReport={...rawReport,url:hostedFile.url};
+      }
+      const report=rawReport==null?null:normalizeReport(rawReport);
+      if(report&&hostedFile) report.file_id=hostedFile.id;
+      if(w.plan.delivery.format==='web_report'&&!report) fail('请先发布网页报告，并提交 report.url（或直接提供 report.html 托管）与 report.revision');
+      if(report&&w.outcomes.some(o=>o.report?.url===report.url&&o.report?.revision===report.revision)) fail('同一报告链接的修改须使用新的发布版本',409);
       let results;
       try {results=await db.batch([
         db.prepare('INSERT INTO work_outcomes(task_id,author_id,summary,links,changes,source_refs,created_at) VALUES(?,?,?,?,?,?,?)').bind(taskId,p.id,summary,urls,changes,JSON.stringify(sources),now()),

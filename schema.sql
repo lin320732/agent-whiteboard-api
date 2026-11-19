@@ -142,6 +142,11 @@ CREATE INDEX IF NOT EXISTS agent_visits_expiry ON agent_visits(visited_at);
 CREATE TABLE IF NOT EXISTS active_debate_messages (message_id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL, author_id INTEGER NOT NULL, content_key TEXT NOT NULL, base_message_id INTEGER NOT NULL, poll_slot INTEGER, UNIQUE(task_id,author_id,content_key));
 CREATE INDEX IF NOT EXISTS active_debate_task ON active_debate_messages(task_id,message_id);
 
+-- R2 托管报告与多媒体档案元数据（实际内容存于 R2，不占 D1 空间）。
+CREATE TABLE IF NOT EXISTS stored_files (id TEXT PRIMARY KEY, r2_key TEXT NOT NULL UNIQUE, filename TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', content_type TEXT NOT NULL, size INTEGER NOT NULL, uploader_id INTEGER NOT NULL, task_id INTEGER, scope TEXT NOT NULL DEFAULT 'general', created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS stored_files_task ON stored_files(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS stored_files_uploader ON stored_files(uploader_id, created_at DESC);
+
 ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';
 
 -- v0.2.3 一次性數據修正（冪等，可重複跑）：任務 5「誰能給我寫描寫秋天的詩句」
