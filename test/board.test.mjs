@@ -28,7 +28,28 @@ test("board static content is served with script protections", async () => {
   assert.match(res.headers.get("Content-Security-Policy"), /script-src 'self'/);
   assert.match(res.headers.get("Content-Security-Policy"), /img-src 'self' data: https:/);
   assert.match(res.headers.get("Content-Security-Policy"), /media-src 'self' https:/);
-  assert.match(res.headers.get("Content-Security-Policy"), /frame-src https:\/\/www.youtube-nocookie.com https:\/\/player.bilibili.com/);
+  assert.match(res.headers.get("Content-Security-Policy"), /frame-src 'self' https:\/\/www.youtube-nocookie.com https:\/\/player.bilibili.com https:\/\/www.bilibili.com(?:;|$)/);
   assert.equal(res.headers.get("X-Content-Type-Options"), "nosniff");
   assert.equal(res.headers.get("Cache-Control"), "no-store");
+});
+
+
+test("Bilibili metadata page isolates provider scripts from the board", async () => {
+  const env = {
+    API: { async fetch() { throw Error("metadata page must not reach API"); } },
+    ASSETS: { async fetch() { return new Response("<html>metadata</html>", {headers: {"Content-Type": "text/html"}}); } },
+  };
+  const res = await board.fetch(new Request("https://board.example.test/bilibili-metadata.html?bvid=BV1B7411m7LV"), env);
+  const policy = res.headers.get("Content-Security-Policy");
+  assert.match(policy, /sandbox allow-scripts;/);
+  assert.doesNotMatch(policy, /allow-same-origin|unsafe-inline|unsafe-eval/);
+  assert.match(policy, /script-src 'self' https:\/\/api.bilibili.com\/x\/web-interface\/wbi\/view$/);
+  assert.match(policy, /frame-ancestors 'self'/);
+  assert.equal(res.headers.get("X-Frame-Options"), "SAMEORIGIN");
+  assert.equal(res.headers.get("Cache-Control"), "no-store");
+  const boardRes = await board.fetch(new Request("https://board.example.test/"), env);
+  assert.doesNotMatch(boardRes.headers.get("Content-Security-Policy"), /api.bilibili.com/);
+  assert.equal(boardRes.headers.get("X-Frame-Options"), "DENY");
+  const canonical = await board.fetch(new Request("https://board.example.test/bilibili-metadata?bvid=BV1B7411m7LV"), env);
+  assert.equal(canonical.headers.get("Content-Security-Policy"), policy, "Cloudflare Assets redirects HTML files to an extensionless URL");
 });

@@ -23,7 +23,7 @@ test('Unicode emoji and shortcodes render in prose while code and unknown names 
 });
 
 test('emoji shortcodes work in named links, media captions and source labels', () => {
-  const html = renderMarkdown('[发布 :tada:](https://example.com/report)\n\n![图 :smile:](https://example.com/chart.png)\n\n![video: 演示 :thumbsup:](https://www.youtube.com/watch?v=7cjVj1ZyzyE)');
+  const html = renderMarkdown('[发布 :tada:](https://example.com/report)\n\n![图 :smile:](https://example.com/chart.png)\n\n![video: 演示 :thumbsup:](https://www.youtube.com/watch?v=M7lc1UVf-VE)');
   assert.match(html, /发布 🎉<\/a>/);
   assert.match(html, /alt="图 😄"/);
   assert.match(html, /播放视频 · YouTube · 演示 👍/);
@@ -99,15 +99,16 @@ test('a linked image uses the surrounding link without nesting anchors', () => {
 });
 
 test('standalone YouTube and Bilibili links become unloaded, expandable players', () => {
-  const source = '[讲解](https://www.youtube.com/watch?v=7cjVj1ZyzyE&t=1m30s)\n\nhttps://youtu.be/7cjVj1ZyzyE\n\n![视频：演示](https://www.bilibili.com/video/BV1B7411m7LV?p=2&t=45)';
+  const source = '[讲解](https://www.youtube.com/watch?v=M7lc1UVf-VE&t=1m30s)\n\nhttps://youtu.be/M7lc1UVf-VE\n\n![视频：演示](https://www.bilibili.com/video/BV1B7411m7LV?p=2&t=45)';
   const html = renderMarkdown(source);
   assert.equal((html.match(/class="markdown-video-embed"/g) || []).length, 3);
-  assert.match(html, /data-embed-src="https:\/\/www.youtube-nocookie.com\/embed\/7cjVj1ZyzyE\?start=90"/);
+  assert.match(html, /data-embed-src="https:\/\/www.youtube-nocookie.com\/embed\/M7lc1UVf-VE\?start=90"/);
   assert.match(html, /data-embed-src="https:\/\/player.bilibili.com\/player.html\?bvid=BV1B7411m7LV&amp;p=2&amp;t=45&amp;autoplay=0"/);
   assert.doesNotMatch(html, /<iframe|autoplay="|<p><details/);
+  assert.ok(html.indexOf('markdown-video-source') < html.indexOf('markdown-video-frame'), '原视频入口应在播放器之前可见');
   assert.deepEqual(markdownLinks(source), [
-    {url: 'https://www.youtube.com/watch?v=7cjVj1ZyzyE&t=1m30s', label: '讲解'},
-    {url: 'https://youtu.be/7cjVj1ZyzyE', label: 'YouTube 视频'},
+    {url: 'https://www.youtube.com/watch?v=M7lc1UVf-VE&t=1m30s', label: '讲解'},
+    {url: 'https://youtu.be/M7lc1UVf-VE', label: 'YouTube 视频'},
     {url: 'https://www.bilibili.com/video/BV1B7411m7LV?p=2&t=45', label: '演示'},
   ]);
 });
@@ -120,16 +121,23 @@ test('Bilibili AV, episode and player links use the official player address', ()
   ]) assert.ok(renderMarkdown(source).includes(`data-embed-src="https://player.bilibili.com/player.html?${destination}&amp;autoplay=0"`), source);
 });
 
+test('Bilibili share links retain mobile playback identifiers without copying arbitrary parameters', () => {
+  const html = renderMarkdown('https://player.bilibili.com/player.html?isOutside=true&aid=98647868&bvid=BV1B7411m7LV&cid=168325345&p=2&t=45&extra=unsafe');
+  assert.match(html, /data-embed-src="https:\/\/player.bilibili.com\/player.html\?bvid=BV1B7411m7LV&amp;aid=98647868&amp;cid=168325345&amp;p=2&amp;t=45&amp;autoplay=0"/);
+  const invalid = renderMarkdown('https://www.bilibili.com/video/BV1B7411m7LV?aid=oops&cid=9999999999999999');
+  assert.match(invalid, /data-embed-src="https:\/\/player.bilibili.com\/player.html\?bvid=BV1B7411m7LV&amp;autoplay=0"/);
+});
+
 test('only recognized standalone video links embed; hostile labels stay text', () => {
   const invalid = [
-    '[假域名](https://www.youtube.com.evil.example/watch?v=7cjVj1ZyzyE)',
+    '[假域名](https://www.youtube.com.evil.example/watch?v=M7lc1UVf-VE)',
     '[错误 ID](https://www.youtube.com/watch?v=bad)',
     '[假 B 站](https://www.bilibili.com.evil.example/video/BV1B7411m7LV)',
-    '文字 [讲解](https://www.youtube.com/watch?v=7cjVj1ZyzyE) 仍是文字',
-    '`https://youtu.be/7cjVj1ZyzyE`',
+    '文字 [讲解](https://www.youtube.com/watch?v=M7lc1UVf-VE) 仍是文字',
+    '`https://youtu.be/M7lc1UVf-VE`',
   ];
   for (const source of invalid) assert.doesNotMatch(renderMarkdown(source), /markdown-video-embed|data-embed-src|<iframe/, source);
-  const html = renderMarkdown('[&lt;img src=x onerror=evil&gt;](https://www.youtube.com/watch?v=7cjVj1ZyzyE)');
+  const html = renderMarkdown('[&lt;img src=x onerror=evil&gt;](https://www.youtube.com/watch?v=M7lc1UVf-VE)');
   assert.match(html, /img src=x onerror=evil/);
   assert.doesNotMatch(html, /<img\b|<iframe|" onerror=/);
 });

@@ -98,6 +98,12 @@ function platformVideo(raw) {
     if (!id) return null;
     const embed = new URL('https://player.bilibili.com/player.html');
     embed.searchParams.set(key, id);
+    // Share/iframe URLs may already contain the identifiers needed by the
+    // mobile player when its video-info request is rejected.
+    for (const name of ['aid', 'cid']) {
+      const value = url.searchParams.get(name);
+      if (key !== 'episodeId' && /^[1-9][0-9]{0,15}$/.test(value || '') && Number.isSafeInteger(Number(value))) embed.searchParams.set(name, value);
+    }
     const page = Number(url.searchParams.get('p'));
     if (Number.isSafeInteger(page) && page > 1 && page <= 9999) embed.searchParams.set('p', String(page));
     const seconds = videoSeconds(url.searchParams.get('t'));
@@ -110,7 +116,7 @@ function platformVideo(raw) {
 
 function renderVideoEmbed({url, label, provider, embedUrl}) {
   const escape = markdown.utils.escapeHtml;
-  return `<details class="markdown-video-embed" data-embed-src="${escape(embedUrl)}"><summary>播放视频 · ${escape(provider)} · ${escape(label)}</summary><span class="markdown-video-frame"></span><a class="plain-link markdown-video-source" href="${escape(url)}" target="_blank" rel="noopener noreferrer">在${escape(provider)}打开原视频</a></details>\n`;
+  return `<details class="markdown-video-embed" data-embed-src="${escape(embedUrl)}"><summary>播放视频 · ${escape(provider)} · ${escape(label)}</summary><a class="plain-link markdown-video-source" href="${escape(url)}" target="_blank" rel="noopener noreferrer">无法播放？在${escape(provider)}打开原视频</a><span class="markdown-video-frame"></span></details>\n`;
 }
 
 // Image syntax embeds HTTPS images. An audio:/video: alt prefix embeds a
