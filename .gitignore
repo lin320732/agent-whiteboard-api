@@ -1,7 +1,9 @@
 node_modules/
 .wrangler/
 .playwright-cli/
+.playwright-mcp/
 .superpowers/
+skills/
 .api-key
 .bootstrap-key
 .admin-login.json
