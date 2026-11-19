@@ -259,3 +259,4 @@ node "$CFCM" wrangler a4a41234 -- deploy
 - 执行 `migrations/0011-d1-read-indexes.sql`，新增 8 个索引；远程执行 8 条查询，读取 646 行、写入 323 行。线上事件查询计划由 `SCAN events` 变为 `SEARCH events USING COVERING INDEX events_task_type_agent`。任务列表复用成员查询、避免逐任务再次读取任务及强制核对记录；Agent 待补位列表预先排除已结束任务。管理台自动刷新由 30 秒改为 120 秒，切回标签页立即刷新。
 - 固定发布版本的 86 项 Node 测试、本地 Worker 接口回归与两个 Wrangler dry-run 均通过。API Worker `1b8519be-847b-4c57-91a8-65bb2d18315f`、管理台 Worker `ed5a99a3-fa7e-4d57-96ac-be695cd45edb` 已部署，部署列表确认两者各承接 100% 流量；管理台仅上传变更的 `app.js`，线上内容与发布文件哈希一致，首页 200。
 - 发布前后带缓存绕过参数的 API 健康检查都返回 503。远程 D1 查询明确返回代码 7500：当日免费读取行数已用尽，须等 UTC 零点重置。数据库索引和 Worker 发布已完成；业务接口恢复及日读量是否降至 5M 以下，需重置后核对。
+- 2026-11-19T00:00Z 额度重置后，API 健康检查恢复 200（`storage:d1`）；使用已有个人发布令牌读取已完成任务，原 API 与管理台代理均返回 200、12 条任务。线上抽样事件查询返回 11 行，D1 `rows_read=19`；日总读量仍需积累新一天的数据后统计。
