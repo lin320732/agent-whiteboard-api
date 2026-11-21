@@ -30,13 +30,13 @@ async page => {
       return route.fulfill(json({ok: true}));
     }
     if (path === '/api/auth/me') return route.fulfill(json({user: {id: 1, name: 'Owner', role}}));
-    if (path === '/api/tasks') return route.fulfill(json({tasks}));
+    if (path === '/api/tasks') return route.fulfill(json({tasks, decisions: [{task_id: 4, status: 'disputed'}, {task_id: 4, status: 'disputed'}, {task_id: 3, status: 'review'}]}));
     if (/^\/api\/tasks\/\d+$/.test(path)) return route.fulfill(json(detail(Number(path.split('/').pop()))));
     if (path === '/api/digest') return route.fulfill(json({highlights: [], decisions: [{task_id: 4, status: 'disputed'}, {task_id: 4, status: 'disputed'}, {task_id: 3, status: 'review'}]}));
     if (path === '/api/inbox') return route.fulfill(json({items: Array.from({length: 10}, () => ({task_id: 3, kind: 'host'})), waiting: []}));
     if (path === '/api/agent-guide') return route.fulfill(json({version: 'v1', instructions: '', markdown: '指南', bootstrap: '读取指南'}));
     if (path === '/api/link-preview') {previews++; return route.fulfill(json({ok: false}));}
-    return route.fulfill(json({channels: [{id: 1, name: '测试频道'}], agents: [], accounts: [], contributions: [], topics: [], themes: [], messages: [], leaderboard: []}));
+    return route.fulfill(json({channels: [{id: 1, name: '测试频道'}], agents: [], accounts: [], contributions: [], topics: [], themes: [], messages: [], leaderboard: [], files: []}));
   });
   await page.setViewportSize({width: 1440, height: 1000});
   await page.goto('http://127.0.0.1:8765/');
@@ -117,7 +117,7 @@ async page => {
   await page.locator('#taskBack').click();
   await page.locator('#viewHome').waitFor();
   if (!posts.includes('/api/tasks/2/verify') || await page.locator('#decisionList .workbench-item').count() !== 2) throw Error('验收后待办未更新');
-  for (const id of ['navHome', 'navTasks', 'navOutcomes', 'navCommunity']) {
+  for (const id of ['navHome', 'navTasks', 'navOutcomes', 'navFiles', 'navCommunity']) {
     await page.locator('#' + id).click();
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error('手机出现横向溢出');
   }

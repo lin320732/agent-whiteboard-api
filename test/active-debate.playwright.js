@@ -42,17 +42,17 @@ async page => {
   await page.locator('#navTasks').click();
   await page.locator('#createTaskBox > summary').click();
   const create=page.locator('#taskForm');
-  await create.getByLabel('任务目标',{exact:true}).selectOption('active_debate');
+  await create.locator('#taskModeBar [data-mode="debate"]').click();
   const deadline=create.getByLabel('激辩截止时间',{exact:true});await deadline.waitFor();
   await create.getByLabel('截止总结作者（可选）',{exact:true}).waitFor();
   if(!await deadline.getAttribute('required')?.then(x=>x!==null)) throw Error('激辩没有要求截止时间');
-  if(!await create.getByLabel('需要核对正反观点',{exact:true}).isChecked()||await create.getByLabel('需要独立核查',{exact:true}).isChecked()) throw Error('激辩默认验收错误');
-  if(await create.getByLabel('最少来源数量',{exact:true}).inputValue()!=='0') throw Error('激辩被要求来源');
+  if(await create.locator('#taskDeadlineField').isVisible()) throw Error('激辩模式仍显示重复的期望截止日期');
+  if(await create.locator('.plan-task-primary').isVisible()) throw Error('激辩模式未隐藏不适用的协作任务字段');
   await create.getByLabel('标题',{exact:true}).fill('持续观点激辩');
   await deadline.fill('2030-01-01T20:00');
   await create.getByRole('button',{name:'发布到白板'}).click();
   await page.locator('#taskDetail h3').getByText('自由观点激辩',{exact:true}).waitFor();
-  if(created?.type!=='active_debate'||created.plan?.goal!=='active_debate'||!created.plan.schedule.end_at.endsWith('Z')) throw Error('激辩发布未正确提交截止时间与类型');
+  if(created?.type!=='active_debate'||created.plan?.goal!=='active_debate'||!created.plan.schedule.end_at.endsWith('Z')||created.plan.acceptance.min_sources!==0||!created.plan.acceptance.opposing_views||created.plan.acceptance.independent_review) throw Error('激辩发布未正确提交截止时间与默认验收');
   await page.locator('.active-debate-progress').getByText('1 位 Agent · 0/3 轮交锋',{exact:true}).waitFor();
   if(await page.locator('#taskDetail').getByText('等待 Agent 认领。',{exact:true}).count()) throw Error('激辩仍提示认领');
   await page.locator('#taskDetail').getByRole('tab',{name:'成果',exact:true}).click();
@@ -70,7 +70,7 @@ async page => {
   const sent=posts.find(p=>p.path.endsWith('/debate'))?.body;
   if(sent.expected_latest_id!==53||sent.reply_to!==53||sent.links.length!==0) throw Error('发言未携带上下文版本或仍强制外链');
   if(posts.filter(p=>p.path.endsWith('/debate')).at(-1).body.expected_latest_id!==54) throw Error('冲突后没有刷新讨论上下文');
-  await page.locator('#notice').getByText('辩论已发布',{exact:true}).waitFor();
+  await page.locator('#notice').getByText('发言已发布',{exact:true}).waitFor();
   await page.locator('#taskDetail article').filter({hasText:'我质疑这个前提'}).waitFor();
   await page.screenshot({path:'.playwright-cli/active-debate-active-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
@@ -78,6 +78,7 @@ async page => {
   await page.screenshot({path:'.playwright-cli/active-debate-active-mobile.png',fullPage:false});
   await page.setViewportSize({width:1440,height:1000});
   ended=true;await page.reload();
+  await page.locator('#navHome').click();
   await page.locator('#decisionList').getByText('激辩参与不足',{exact:true}).waitFor();
   await page.locator('#navTasks').click();await page.locator('#taskList .task-item').first().click();
   await page.locator('#taskDetail').getByRole('tab',{name:/^讨论/}).click();

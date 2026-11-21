@@ -1,13 +1,18 @@
-import { AUTH_SCHEMA, initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute } from "./auth.js";
+import { AUTH_SCHEMA, initAuthSchema, principalFor, permit, actorName, originAllowed, authRoute, hashSecret } from "./auth.js";
 import { COLLABORATION_SCHEMA, initCollaboration } from "./collaboration-schema.js";
 import { collaborationRoute, decorateCollaboration, readBatch } from "./collaboration.js";
 import { communityRoute } from "./community.js";
 import { GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, initAgentGuide, agentGuideRoute, GUIDE_DISCOVERY } from './agent-guide.js';
-import { TASK_PLAN_SCHEMA, initTaskPlans, newPlan, planInsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
+import { TASK_PLAN_SCHEMA, initTaskPlans, newPlan, planInsert, workflowUpsert, validatePlanAgents, PlanError, readPlan, scheduleState, nextOccurrenceStatements, legacyType } from './task-plan.js';
 import { taskAuditStatement } from './task-activity.js';
 import { AGENT_VISITS_SCHEMA, initAgentVisits, recordAgentVisit, pruneAgentVisits } from './agent-visits.js';
-import { ACTIVE_DEBATE_SCHEMA, initActiveDebate, isActiveDebate, postActiveDebate, DebateError } from './active-debate.js';
-import { FILES_SCHEMA, initFilesSchema, filesRoute, FileError } from './files.js';
+import { AGENT_INBOX_SCHEMA, initAgentInbox } from './agent-inbox.js';
+import { AGENT_QUOTAS_SCHEMA, initAgentQuotas, pruneAgentQuotaReports, agentQuotaRoute, QuotaError } from './agent-quotas.js';
+import { AGENT_DIRECTIVES_SCHEMA, initAgentDirectives, agentDirectiveRoute, DirectiveError } from './agent-directives.js';
+import { ACTIVE_DEBATE_SCHEMA, initActiveDebate, isActiveDebate, postActiveDebate, DebateError, RECAP_STANCE, validateSummaryReferences, validateDebateReferences } from './active-debate.js';
+import { FILES_SCHEMA, initFilesSchema, filesRoute, servePublicFileRequest, FileError } from './files.js';
+import { initBoardTaskRevision, readBoardTaskRevision } from './task-board-revision.js';
+import { readTaskSummaryData } from './task-summary.js';
 
 // Agent 共享白板 — Cloudflare Worker 後端 API（v0.2.2 辯論）
 // 來源：Muse 空間「Agent 共享白板」的動作對應成公開 HTTP 接口。
@@ -71,8 +76,8 @@ const VERSION = "0.2.4";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match",
+  "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match, Range, X-File-Name, X-File-Title, X-Task-Id",
 };
 
 // 角色：API 用英文 key，中文名只出現在文檔與白板顯示
@@ -273,7 +278,13 @@ function extractUrls(text) {
 }
 
 // 辯論立場：接受中文或英文別名，統一存中文
-const STANCES = { "支持": "支持", "support": "支持", "反駁": "反駁", "反驳": "反駁", "rebut": "反駁", "補充": "補充", "补充": "補充", "add": "補充", "supplement": "補充" };
+const STANCES = {
+  "支持": "支持", "support": "支持",
+  "反駁": "反駁", "反驳": "反駁", "rebut": "反駁",
+  "補充": "補充", "补充": "補充", "add": "補充", "supplement": "補充",
+  "阶段总结": RECAP_STANCE, "階段總結": RECAP_STANCE, "总结": RECAP_STANCE, "總結": RECAP_STANCE,
+  "summary": RECAP_STANCE, "recap": RECAP_STANCE, "interim_summary": RECAP_STANCE,
+};
 function normalizeStance(v) {
   const key = String(v || "").trim();
   return Object.hasOwn(STANCES, key) ? STANCES[key] : "";
@@ -368,19 +379,22 @@ function gateError(readiness) {
 }
 
 // 讀一條任務的全部上下文（任務、質疑、補充、辯論、參與事件、強制通過記錄）
-async function loadTaskContext(env, useDb, id, knownTask = null) {
+async function loadTaskContext(env, useDb, id, knownTask = null, summary = false) {
   if (useDb) {
+    const readDebate = !summary || (knownTask.type !== 'active_debate' && !['done','closed'].includes(knownTask.status));
     const queries = [
       ...(!knownTask ? [['SELECT * FROM tasks WHERE id=?',id]] : []),
-      ['SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC',id],
-      ['SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC',id],
-      ['SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC',id],
+      [summary?'SELECT id,agent FROM challenges WHERE task_id=? ORDER BY id':'SELECT * FROM challenges WHERE task_id=? ORDER BY id ASC',id],
+      [summary?'SELECT agent,links FROM supplements WHERE task_id=? ORDER BY id':'SELECT * FROM supplements WHERE task_id=? ORDER BY id ASC',id],
+      ...(readDebate ? [[summary?'SELECT DISTINCT agent,role,stance FROM debate_messages WHERE task_id=? ORDER BY id':'SELECT * FROM debate_messages WHERE task_id=? ORDER BY id ASC',id]] : []),
       ["SELECT agent FROM events WHERE task_id=? AND type IN ('claim','result','challenge','supplement')",id],
       ...(!knownTask ? [['SELECT * FROM force_approvals WHERE task_id=? ORDER BY id ASC',id]] : []),
     ];
     const rows = await readBatch(env.DB, queries);
     const tasks = knownTask ? [knownTask] : rows.shift();
-    const [challenges,supplements,debate,ev,forceApprovals=[]] = rows;
+    const [challenges,supplements] = rows.splice(0,2);
+    const debate = readDebate ? rows.shift() : [];
+    const [ev,forceApprovals=[]] = rows;
     const task=tasks[0];
     if (!task) return null;
     return { task, challenges, supplements, debate, eventAgents: ev.map(r => r.agent), forceApprovals };
@@ -443,15 +457,23 @@ const CORE_SCHEMA = `CREATE TABLE IF NOT EXISTS channels (id INTEGER PRIMARY KEY
   CREATE INDEX IF NOT EXISTS debate_messages_task ON debate_messages(task_id);
   CREATE INDEX IF NOT EXISTS messages_channel ON messages(channel_id);`;
 // Derive the probe from the same DDL as migrations, so new tables cannot be skipped.
-const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, ACTIVE_DEBATE_SCHEMA, FILES_SCHEMA].join('\n')
-  .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)]
-  .map(match => ({ type: match[1].toLowerCase(), name: match[2] }));
+const schemaObjects = [...[CORE_SCHEMA, AUTH_SCHEMA, COLLABORATION_SCHEMA, TASK_PLAN_SCHEMA, GUIDE_SCHEMA, GUIDE_PERSONAL_SCHEMA, AGENT_VISITS_SCHEMA, AGENT_QUOTAS_SCHEMA, AGENT_DIRECTIVES_SCHEMA, AGENT_INBOX_SCHEMA, ACTIVE_DEBATE_SCHEMA, FILES_SCHEMA].join('\n')
+  .matchAll(/CREATE\s+(?:UNIQUE\s+)?(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\s+(\w+)(?:\s+ON\s+(\w+))?/gi)]
+  .map(match => ({ type: match[1].toLowerCase(), name: match[2], table: match[3] }));
+const indexedTables = JSON.stringify([...new Set(schemaObjects.filter(object=>object.type==='index').map(object=>object.table))]);
 const initializedDbs = new WeakSet();
 async function schemaReady(db) {
   if (typeof db.prepare !== 'function') return false;
-  const names = schemaObjects.map(object => object.name);
-  const { results } = await db.prepare(`SELECT name,type FROM sqlite_master WHERE name IN (${names.map(() => '?').join(',')})`).bind(...names).all();
-  if (!schemaObjects.every(expected => results.some(row => row.name === expected.name && row.type === expected.type))) return false;
+  // Table and index metadata keep this check independent of the number of triggers.
+  const [tables,indexes] = await readBatch(db, [
+    ['PRAGMA main.table_list'],
+    ['SELECT i.name FROM json_each(?) AS t CROSS JOIN pragma_index_list(t.value) AS i', indexedTables],
+  ]);
+  const schemaNames = {
+    table: new Set(tables.filter(row=>row.type==='table').map(row=>row.name)),
+    index: new Set(indexes.map(row=>row.name)),
+  };
+  if (!schemaObjects.every(expected => schemaNames[expected.type].has(expected.name))) return false;
   const [columns, channels] = await readBatch(db, [
     ['PRAGMA table_info(tasks)'],
     ['SELECT id FROM channels LIMIT 1'],
@@ -476,6 +498,9 @@ async function initializeDatabase(env) {
   await tryAlter(env, "ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research'");
   await initAuthSchema(env.DB);
   await initAgentVisits(env.DB);
+  await initAgentQuotas(env.DB);
+  await initAgentDirectives(env.DB);
+  await initAgentInbox(env.DB);
   await initCollaboration(env.DB);
   await initTaskPlans(env.DB);
   await initAgentGuide(env.DB);
@@ -541,8 +566,11 @@ function buildLeaderboard(eventRows) {
 async function displayLabels(db) {
   const rows = await db.prepare(`SELECT p.name AS actor, l.display_name
     FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`).all();
+  return labelsFromRows(rows.results);
+}
+function labelsFromRows(rows) {
   const names = new Map();
-  for (const row of rows.results) {
+  for (const row of rows) {
     const match = names.get(row.actor);
     if (match) match.count++;
     else names.set(row.actor, {count: 1, label: row.display_name});
@@ -584,6 +612,86 @@ function projectDisplayNames(data, labels) {
   return data;
 }
 
+async function listD1Tasks(env, url, principal, summaryAt = null) {
+  const summary = summaryAt !== null;
+  const status = url.searchParams.get("status"), channelId = url.searchParams.get("channelId"), needs = url.searchParams.get("needs");
+  let sql = "SELECT * FROM tasks WHERE 1=1", args = [];
+  if (status) { sql += " AND status=?"; args.push(status); }
+  if (channelId) { sql += " AND channel_id=?"; args.push(Number(channelId)); }
+  if (needs === "agent") sql += " AND status IN ('open','in_progress','review')";
+  const scope = sql.replace('SELECT * FROM tasks', 'SELECT id FROM tasks');
+  sql += " ORDER BY id DESC";
+  const snapshot = summary ? await readTaskSummaryData(env.DB,scope,args,summaryAt) : null;
+  const results = snapshot ? snapshot.tasks : (await env.DB.prepare(sql).bind(...args).all()).results;
+  const people = snapshot ? snapshot.people : results.length ? (await env.DB.prepare("SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active,p.kind FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id").all()).results : [];
+  let nextChangeAt = 0;
+  const decisions = [];
+  // Full task contexts keep bounded I/O; summaries reuse one consistent snapshot.
+  for (let offset=0; offset<results.length; offset+=3) {
+    await Promise.all(results.slice(offset,offset+3).map(async task => {
+      const context = snapshot ? snapshot.contexts.get(task.id) : await loadTaskContext(env, true, task.id, task, summary);
+      const readiness = computeReadiness(task, context.challenges, context.supplements, context.eventAgents, context.debate);
+      const enriched = await decorateCollaboration(env.DB, task, context, readiness, computeCollaboration(task, readiness, context),principal,people,summaryAt,snapshot?.workflows.get(task.id));
+      const work = enriched.workflow, outcome = work.outcomes[0];
+      task.verify_readiness = enriched.readiness;
+      task.collaboration = enriched.collaboration;
+      task.host = work.host;
+      task.plan = work.plan;
+      task.goal = task.plan.goal;
+      if(work.discussion) task.discussion = work.discussion;
+      task.report = outcome?.report || null;
+      task.outcome_preview = outcome ? {summary: Array.from(outcome.summary || '').slice(0, 400).join(''), author: outcome.author, updated_at: outcome.created_at} : null;
+      if (summary) {
+        delete task.detail;
+        delete task.result_links;
+        task.result_summary = Array.from(task.result_summary || '').slice(0,400).join('');
+        if (task.discussion) {
+          const {phase, participation_sufficient} = task.discussion;
+          task.discussion = {phase, ...(phase==='ended'?{participation_sufficient}:{})};
+        }
+        if (!['done','closed'].includes(task.status)) {
+          if (permit(principal,"admin") && work.issues.some(issue=>issue.state==='disputed')) decisions.push({task_id:task.id,status:'disputed'});
+          for (const timestamp of [task.plan.schedule.start_at,task.plan.schedule.end_at,work.resume_at]) {
+            const boundary = Date.parse(timestamp);
+            if (boundary > summaryAt && (!nextChangeAt || boundary < nextChangeAt)) nextChangeAt = boundary;
+          }
+        }
+      }
+    }));
+  }
+  const tasks = needs === "agent" ? results.filter(task => task.collaboration.help_wanted) : results;
+  return {tasks, decisions, nextChangeAt, ...(snapshot?{revision:snapshot.revision,labels:labelsFromRows(people)}:{})};
+}
+
+async function boardTaskList(request, env, url, principal, revision) {
+  if (principal?.via !== 'session') return err("請先登入", principal ? 403 : 401);
+  if (!revision) {
+    await initBoardTaskRevision(env.DB);
+    revision = await readBoardTaskRevision(env.DB);
+  }
+  const filters = ["status","channelId","needs"].map(name=>url.searchParams.get(name));
+  const filterKey = filters.some(value=>value!==null) ? await hashSecret(JSON.stringify(filters)) : "all";
+  const prefixFor = value => `"board-tasks-v1-${principal.id}-${principal.role}-${filterKey}-${value}-`;
+  const prefix = prefixFor(revision);
+  const at = Date.now();
+  // Compression can turn a strong validator into W/"..." at the edge. GET
+  // validators use weak comparison, including a list of cached representations.
+  const prior = request.headers.get('If-None-Match')?.split(',').map(value => value.trim().replace(/^W\//,''))
+    .find(value => {
+      const expiry = value.startsWith(prefix) ? value.slice(prefix.length).match(/^(\d+)"$/)?.[1] : null;
+      return expiry != null && (expiry === '0' || Number(expiry) > at);
+    });
+  // A scheduled start, deadline, or wait can change the summary without a write.
+  if (prior) {
+    return new Response(null, {status:304, headers: {"ETag":prior,"Cache-Control":"no-store","Vary":"Cookie"}});
+  }
+  const {tasks, decisions, nextChangeAt, revision:snapshotRevision, labels} = await listD1Tasks(env,url,principal,at);
+  const response = json(projectDisplayNames({ok:true,tasks,decisions},labels));
+  response.headers.set("ETag",`${prefixFor(snapshotRevision||revision)}${nextChangeAt}"`);
+  response.headers.set("Vary","Cookie");
+  return response;
+}
+
 // Access control is enforced once, before any business route. No route accepts a
 // request-body identity as proof of permission.
 function routeAction(method, path) {
@@ -599,10 +707,14 @@ function routeAction(method, path) {
 
 const ENDPOINTS = [
   "GET /api/admin/agents/:id/visits",
+  "GET /api/admin/agents/:id/quota",
+  "GET /api/admin/agents/:id/directives", "POST /api/admin/agents/:id/directives", "DELETE /api/admin/agents/:id/directives/:directiveId",
+  "GET /api/agent/directives", "POST /api/agent/directives/:id/complete",
+  "GET /api/agent/quota", "POST /api/agent/quota", "PUT /api/agent/quota",
   "GET /api/agent-guide", "POST /api/admin/agent-guide",
   "GET /api/files", "POST /api/files", "PUT /api/files/:filename", "GET /api/files/:id/:filename", "DELETE /api/files/:id",
   "GET /api/channels", "POST /api/channels",
-  "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "POST /api/tasks",
+  "GET /api/tasks?status=open&channelId=1", "GET /api/tasks?needs=agent", "GET /api/tasks?view=summary", "POST /api/tasks",
   "GET /api/tasks/:id", "POST /api/tasks/:id/claim", "POST /api/tasks/:id/result",
   "POST /api/tasks/:id/verify", "POST /api/tasks/:id/reopen",
   "POST /api/tasks/:id/challenge", "GET /api/tasks/:id/challenges",
@@ -622,13 +734,26 @@ const businessWorker = {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    const useDb = await dbInit(env).catch(error => {
+    const ensureDb = () => dbInit(env).catch(error => {
+      console.error("whiteboard-d1-init", error?.message || String(error));
+      return false;
+    });
+    const publicFileResponse = await servePublicFileRequest(request, env, path, ensureDb);
+    if (publicFileResponse) return publicFileResponse;
+    const wantsSummary = path === "/api/tasks" && request.method === "GET" && url.searchParams.get("view")==="summary";
+    let boardRevision = null;
+    const ready = async () => {
+      if (wantsSummary && env.DB) boardRevision = await readBoardTaskRevision(env.DB);
+      return !!boardRevision || dbInit(env);
+    };
+    const useDb = await ready().catch(error => {
       console.error("whiteboard-d1-init", error?.message || String(error));
       return false;
     });
     if (!useDb && !(env.TEST_MEMORY === "1" && ["localhost", "127.0.0.1"].includes(url.hostname))) return err("D1 暫時不可用，請稍後再試", 503);
 
     const principal = useDb ? await principalFor(request, env) : { kind: "test", role: "admin", name: "Local Test" };
+    if (wantsSummary && useDb) return boardTaskList(request,env,url,principal,boardRevision);
     if (useDb && principal?.kind === 'agent' && principal.via === 'bearer') {
       const visit = recordAgentVisit(env.DB, principal).catch(() => console.error('whiteboard-agent-visit-write-failed'));
       if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(visit);
@@ -643,6 +768,10 @@ const businessWorker = {
     if (useDb) {
       const guideResponse = await agentGuideRoute(request, env, principal, path);
       if (guideResponse) return guideResponse;
+      const quotaResponse = await agentQuotaRoute(request, env, principal, path);
+      if (quotaResponse) return quotaResponse;
+      const directiveResponse = await agentDirectiveRoute(request, env, principal, path);
+      if (directiveResponse) return directiveResponse;
       const handled = await authRoute(request, env, principal, path);
       if (handled) return handled;
       const filesResponse = await filesRoute(request, env, principal, path);
@@ -699,31 +828,7 @@ const businessWorker = {
     if (path === "/api/tasks" && request.method === "GET") {
       const status = url.searchParams.get("status"), channelId = url.searchParams.get("channelId"), needs = url.searchParams.get("needs");
       if (useDb) {
-        let sql = "SELECT * FROM tasks WHERE 1=1", args = [];
-        if (status) { sql += " AND status=?"; args.push(status); }
-        if (channelId) { sql += " AND channel_id=?"; args.push(Number(channelId)); }
-        if (needs === "agent") sql += " AND status IN ('open','in_progress','review')";
-        sql += " ORDER BY id DESC";
-        const r = await env.DB.prepare(sql).bind(...args).all();
-        const people = r.results.length ? await env.DB.prepare(`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`).all() : null;
-        // Bound concurrency to three task contexts; each context batches its D1 reads.
-        for (let offset=0; offset<r.results.length; offset+=3) {
-          await Promise.all(r.results.slice(offset,offset+3).map(async t => {
-            const ctx = await loadTaskContext(env, true, t.id, t);
-            const readiness = computeReadiness(t, ctx.challenges, ctx.supplements, ctx.eventAgents, ctx.debate);
-            const enriched = await decorateCollaboration(env.DB, t, ctx, readiness, computeCollaboration(t, readiness, ctx),principal,people.results);
-            t.verify_readiness = enriched.readiness;
-            t.collaboration = enriched.collaboration;
-            t.host = enriched.workflow.host;
-            t.plan = enriched.workflow.plan;
-            t.goal = t.plan.goal;
-            if(enriched.workflow.discussion) t.discussion=enriched.workflow.discussion;
-            t.report = enriched.workflow.outcomes[0]?.report || null;
-            const outcome = enriched.workflow.outcomes[0];
-            t.outcome_preview = outcome ? {summary: Array.from(outcome.summary || '').slice(0, 400).join(''), author: outcome.author, updated_at: outcome.created_at} : null;
-          }));
-        }
-        const tasks = needs === "agent" ? r.results.filter(t => t.collaboration.help_wanted) : r.results;
+        const {tasks} = await listD1Tasks(env,url,principal);
         return json({ ok: true, tasks, agent_guide: GUIDE_DISCOVERY });
       }
       let list = [...mem.tasks].reverse();
@@ -756,12 +861,18 @@ const businessWorker = {
       if (useDb) {
         const plan = newPlan(b.plan || {}, type);
         if(b.type&&((type==='active_debate')!==isActiveDebate(plan))) return err('激辩的 type 与 plan.goal 须一致');
-        await validatePlanAgents(env.DB, plan);
-        const results = await env.DB.batch([
+        const rawHostId = b.host_id ?? b.plan?.host_id ?? null;
+        const hostId = rawHostId === '' || rawHostId == null ? null : rawHostId;
+        if (hostId != null && principal.kind !== 'test' && !permit(principal, 'admin')) return err('只有管理员可指定主持人', 403);
+        if (hostId != null && plan.collaboration !== 'hosted') return err('只有主持分工模式可指定主持人');
+        await validatePlanAgents(env.DB, plan, hostId);
+        const batch = [
           env.DB.prepare("INSERT INTO tasks (channel_id, title, detail, deadline, created_by, proposed_by, status, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(b.channelId ?? null, b.title, b.detail || "", b.deadline || "", createdBy, proposedBy, status, b.type?type:legacyType(plan.goal), now, now),
           planInsert(env.DB, null, plan),
-        ]);
-        return json({ ok: true, id: results[0].meta.last_row_id, status, plan:{...plan,revision:1} }, 201);
+        ];
+        if (hostId != null) batch.push(workflowUpsert(env.DB, null, hostId, plan));
+        const results = await env.DB.batch(batch);
+        return json({ ok: true, id: results[0].meta.last_row_id, status, plan:{...plan,revision:1}, ...(hostId != null ? { host_id: hostId } : {}) }, 201);
       }
       const t = { id: mem.nextTask++, channel_id: b.channelId ?? null, type, title: b.title, detail: b.detail || "", deadline: b.deadline || "", created_by: createdBy, proposed_by: proposedBy, status, claimed_by: null, claimed_role: null, result_summary: "", result_links: "", created_at: now, updated_at: now };
       mem.tasks.push(t); return json({ ok: true, id: t.id, status }, 201);
@@ -820,7 +931,7 @@ const businessWorker = {
           if (!cur) return err("任務不存在", 404);
           if (cur.status === "closed") return err("已關閉的任務不能辯論");
           if (principal.kind === "test" && !b.agent) return err("缺少 agent（發言的 Agent 名字）");
-          if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
+          if (!stance) return err("stance 必須是 支持 / 反駁 / 補充 / 阶段总结");
           if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
           const links = extractUrls(linksToString(b.links));
           const plan=await readPlan(env.DB,cur);
@@ -830,11 +941,16 @@ const businessWorker = {
             return json({ok:true,...result},result.replayed?200:201);
           }
           if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
-          if (replyTo != null) {
-            const target = await env.DB.prepare("SELECT id FROM debate_messages WHERE id=? AND task_id=?").bind(Number(replyTo), id).first();
+          if (speakerRole === "agent") {
+            if (stance === RECAP_STANCE) validateSummaryReferences(b.content, '阶段总结');
+            else validateDebateReferences(b.content, '讨论发言');
+          }
+          const effectiveReply = stance === RECAP_STANCE ? null : replyTo;
+          if (effectiveReply != null) {
+            const target = await env.DB.prepare("SELECT id FROM debate_messages WHERE id=? AND task_id=?").bind(Number(effectiveReply), id).first();
             if (!target) return err("reply_to 指定的辯論訊息不存在");
           }
-          const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, name, speakerRole, stance, String(b.content).trim(), links.join("\n"), replyTo != null ? Number(replyTo) : null, now).run();
+          const r = await env.DB.prepare("INSERT INTO debate_messages (task_id, agent, role, stance, content, links, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, name, speakerRole, stance, String(b.content).trim(), links.join("\n"), effectiveReply != null ? Number(effectiveReply) : null, now).run();
           const message = await env.DB.prepare("SELECT * FROM debate_messages WHERE id=?").bind(r.meta.last_row_id).first();
           await recordDebateAward(env, true, principal, name, cur, speakerRole);
           return json({ ok: true, message }, 201);
@@ -843,12 +959,13 @@ const businessWorker = {
         if (!t) return err("任務不存在", 404);
         if (t.status === "closed") return err("已關閉的任務不能辯論");
         if (principal.kind === "test" && !b.agent) return err("缺少 agent（發言的 Agent 名字）");
-        if (!stance) return err("stance 必須是 支持 / 反駁 / 補充");
+        if (!stance) return err("stance 必須是 支持 / 反駁 / 補充 / 阶段总结");
         if (!String(b.content || "").trim()) return err("缺少 content（發言內容；反駁必須寫明理由）");
         const links = extractUrls(linksToString(b.links));
         if (stance === "反駁" && links.length === 0) return err("反駁必須附至少一條證據連結（links）");
-        if (replyTo != null && !mem.debate.some(x => x.id === Number(replyTo) && x.task_id === id)) return err("reply_to 指定的辯論訊息不存在");
-        const message = { id: mem.nextDebate++, task_id: id, agent: name, role: speakerRole, stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: replyTo != null ? Number(replyTo) : null, created_at: now };
+        const effectiveReply = stance === RECAP_STANCE ? null : replyTo;
+        if (effectiveReply != null && !mem.debate.some(x => x.id === Number(effectiveReply) && x.task_id === id)) return err("reply_to 指定的辯論訊息不存在");
+        const message = { id: mem.nextDebate++, task_id: id, agent: name, role: speakerRole, stance, content: String(b.content).trim(), links: links.join("\n"), reply_to: effectiveReply != null ? Number(effectiveReply) : null, created_at: now };
         mem.debate.push(message);
         await recordDebateAward(env, false, principal, name, t, speakerRole);
         return json({ ok: true, message }, 201);
@@ -885,9 +1002,11 @@ const businessWorker = {
         } else if (action === "result") {
           if (cur.status !== "in_progress") return err(`只能對進行中的任務交結果，現在是 ${cur.status}`);
           if (principal.kind === "agent" && cur.claimed_by !== name) return err("只有認領者能提交結果", 403);
+          const summaryText = b.summary || b.result_summary || "";
+          if (principal.kind === "agent") validateSummaryReferences(summaryText, '成果总结');
           const links = linksToString(b.links ?? b.result_links);
-          await env.DB.prepare("UPDATE tasks SET status='review', result_summary=?, result_links=?, updated_at=? WHERE id=?").bind(b.summary || b.result_summary || "", links, now, id).run();
-          await taskAuditStatement(env.DB,id,principal,'task_result',{actor_name:name,summary:b.summary||b.result_summary||'',links},now).run();
+          await env.DB.prepare("UPDATE tasks SET status='review', result_summary=?, result_links=?, updated_at=? WHERE id=?").bind(summaryText, links, now, id).run();
+          await taskAuditStatement(env.DB,id,principal,'task_result',{actor_name:name,summary:summaryText,links},now).run();
           await recordEvent(env, true, cur.claimed_by, "result", id, now);
         } else if (action === "verify") {
           if (cur.status !== "review") return err(`只能核對待核對的任務，現在是 ${cur.status}`);
@@ -1067,12 +1186,14 @@ export default {
   async scheduled(_controller, env) {
     if (!await dbInit(env)) throw Error('D1 unavailable for Agent visit cleanup');
     await pruneAgentVisits(env.DB);
+    await pruneAgentQuotaReports(env.DB);
   },
   async fetch(request, env, ctx) {
     let response;
     try {response = await businessWorker.fetch(request, env, ctx);}
-    catch(error) {if(error instanceof PlanError||error instanceof DebateError||error instanceof FileError) return err(error.message,error.status);throw error;}
+    catch(error) {if(error instanceof PlanError||error instanceof DebateError||error instanceof FileError||error instanceof QuotaError||error instanceof DirectiveError) return err(error.message,error.status);throw error;}
     const path = new URL(request.url).pathname;
+    if (request.method==='GET'&&path.replace(/\/$/,'')==='/api/tasks'&&new URL(request.url).searchParams.get('view')==='summary') return response;
     if (!env.DB || !response.ok || request.method === "OPTIONS" || !/^\/api\/(tasks|messages|leaderboard)(\/|$)/.test(path)) return response;
     const labels = await displayLabels(env.DB);
     if (!labels.size) return response;

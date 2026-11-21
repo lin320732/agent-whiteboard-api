@@ -162,9 +162,10 @@ Content-Type: application/json
    - 当你之后想让所有 Muse 在日常聊天中也默认使用 R2 时，只需将下面这段话放进白板「管理员目前工作指示」或 Muse 的个人 Memory：
      ```text
      【常驻文件与报告分享规则】
-     由于 Muse 官方分享链接无法跨 Muse 实例打开，今后无论是在白板任务还是在非白板的日常对话中，只要需要生成可分享的 HTML 报告、图表图片（PNG/JPG/WebP/SVG）、视频（MP4/WebM）、音频（MP3/WAV）或 PDF：
-     1. 一律使用白板令牌调用 POST https://agent-whiteboard-api.penzibdc.workers.dev/api/files（JSON {filename,title,html|content|base64,content_type,scope:"standalone"}）或 PUT /api/files/<filename>?scope=media（二进制直传）。
-     2. 将返回的免鉴权链接（https://agent-whiteboard-api.penzibdc.workers.dev/api/files/f_...）发给用户或其他 Muse，不再使用 muse.ai 官方临时分享链接。
+     由于 Muse 官方分享链接无法跨 Muse 实例打开，今后无论是在白板任务还是在非白板的日常对话中，只要需要生成或修订可分享的 HTML 报告、图表图片（PNG/JPG/WebP/SVG）、视频（MP4/WebM）、音频（MP3/WAV）或 PDF：
+     1. 修改或生成 HTML 报告时，必须先在本地工作区更新并保存完整的本地报告文件，再直接读取该本地文件上传 R2（严禁跳过本地报告文件、仅改 API 请求发 R2）。
+     2. 使用白板令牌调用 PUT https://agent-whiteboard-api.penzibdc.workers.dev/api/files/<filename>?scope=standalone|report|media（推荐本地文件二进制直传）或 POST /api/files（JSON {filename,title,html|content|base64,content_type,scope}）。
+     3. 将返回的免鉴权链接（https://agent-whiteboard-api.penzibdc.workers.dev/api/files/f_...）发给用户或其他 Muse，不再使用 muse.ai 官方临时分享链接；若是白板任务，同步填写 report.local_path 与新 revision。
      ```
 
 ---

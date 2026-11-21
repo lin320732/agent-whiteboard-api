@@ -1,5 +1,13 @@
 async page => {
-  const task = { id: 5, title: "讨论秋天", status: "review", type: "debate", created_by: "管理员" };
+  const task = {
+    id: 5,
+    title: "讨论秋天",
+    detail: "## 讨论议题\n\n- (a) 每天一次心跳\n- (b) 跨阈值触发\n\n<script>alert(1)</script>",
+    status: "review",
+    type: "debate",
+    created_by: "管理员",
+    created_at: "2026-11-15T09:00:00Z",
+  };
   const longName = "Agent " + "長名字".repeat(32);
   const debate = [
     { id: 11, agent: "Agent A", role: "agent", stance: "支持", content: "第一条观点，引用 https://example.com/source", created_at: "2026-11-15T10:00:00Z" },
@@ -36,6 +44,21 @@ async page => {
   await page.locator('#navTasks').click();
   await page.locator("#taskList .task-item").first().click();
   await page.locator('#taskDetail').getByRole('tab',{name:/^讨论/}).click();
+  const topic = page.locator("#detailPanel-conversation .conversation-topic");
+  await topic.waitFor({ timeout: 3000 });
+  if (await topic.getAttribute("open") === null) throw Error("讨论页初始主题默认未展开");
+  if (!await topic.locator(".conversation-topic-badge").getByText("初始主题").count()) throw Error("讨论页初始主题缺少标识");
+  if (!await topic.locator(".conversation-topic-title").getByText("讨论秋天").count()) throw Error("讨论页初始主题缺少标题");
+  if (!await topic.locator(".conversation-topic-meta").getByText("发起：管理员", { exact: false }).count()) throw Error("讨论页初始主题缺少发起人");
+  if (!await topic.locator(".conversation-topic-content h2").getByText("讨论议题").count() || !await topic.locator(".conversation-topic-content li").filter({ hasText: "(b) 跨阈值触发" }).count()) throw Error("讨论页初始主题未渲染完整 Markdown");
+  if (await topic.locator("script").count()) throw Error("讨论页初始主题未过滤危险脚本");
+  if (await topic.locator(".conversation-topic-toggle").textContent() !== "收起主题") throw Error("展开时切换文案错误");
+  await topic.locator(".conversation-topic-summary").click();
+  await topic.locator(".conversation-topic-toggle").getByText("展开主题").waitFor({ timeout: 3000 });
+  if (await topic.getAttribute("open") !== null) throw Error("讨论页初始主题无法收起");
+  await topic.locator(".conversation-topic-summary").click();
+  await topic.locator(".conversation-topic-toggle").getByText("收起主题").waitFor({ timeout: 3000 });
+  if (await topic.getAttribute("open") === null) throw Error("讨论页初始主题无法重新展开");
   const thread = page.locator("#taskDetail .conversation");
   await thread.locator(".conversation-message").first().waitFor({ timeout: 3000 });
   const order = await thread.locator(".conversation-message").evaluateAll(nodes => nodes.map(n => `${n.dataset.kind}:${n.dataset.debateId || n.querySelector('.conversation-speaker')?.textContent}`));
@@ -68,6 +91,7 @@ async page => {
   await page.locator("#taskList .task-item").nth(1).click();
   await page.locator('#taskDetail').getByRole('tab',{name:/^讨论/}).click();
   await page.locator("#taskDetail h3").getByText("空对话").waitFor();
+  if (await page.locator("#detailPanel-conversation .conversation-topic").count()) throw Error("无任务说明时不应显示初始主题卡片");
   if (!await page.locator("#taskDetail .conversation-empty").count()) throw Error("没有发言时未显示空状态");
   await page.locator('#taskBack').click();
   await page.locator("#taskList .task-item").first().click();
@@ -83,8 +107,11 @@ async page => {
   if (await select.inputValue() !== "11" || !await preview.getByText("Agent A", { exact: false }).count() || !await preview.getByText("第一条观点", { exact: false }).count()) throw Error("发言旁的回复按钮没有选中对应 Agent");
   await page.locator('#debateForm select[name="stance"]').selectOption("补充");
   await page.locator('#debateForm textarea[name="content"]').fill("新的回复");
+  await page.locator("#detailPanel-conversation .conversation-topic-summary").click();
+  if (await page.locator("#detailPanel-conversation .conversation-topic").getAttribute("open") !== null) throw Error("发帖前未能收起初始主题");
   await page.locator("#debateForm").getByRole("button", { name: "发表观点" }).click();
   await page.locator("#debate-16 .reply-reference").getByText("Agent A", { exact: false }).waitFor();
+  if (await page.locator("#detailPanel-conversation .conversation-topic").getAttribute("open") !== null) throw Error("刷新讨论后意外重新展开了已收起的初始主题");
   if (submitted?.reply_to !== 11 || submitted?.content !== "新的回复" || submitted?.stance !== "补充") throw Error("发表回复没有带正确的 reply_to");
   role = "viewer";
   await page.reload();

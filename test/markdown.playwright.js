@@ -139,7 +139,6 @@ async page => {
   const named = full.getByRole('link', {name: '官方价格', exact: true});
   if (await named.getAttribute('href') !== 'https://example.com/pricing_(2026)' || await named.getAttribute('rel') !== 'noopener noreferrer') throw Error('命名链接丢失或缺少安全属性');
   if (await page.locator('#taskDetail .outcome-form textarea[name="summary"]').inputValue() !== summary) throw Error('编辑器没有保留 Markdown 原文');
-  await block.locator(':scope > .change-note > summary').click();
   if (await block.locator(':scope > .change-note strong').textContent() !== '修正') throw Error('修改说明没有排版');
   await block.locator('.outcome-links > summary').click();
   if (!await block.locator('.source-list').getByRole('link', {name: '官方价格', exact: true}).count()) throw Error('来源丢失命名链接');
@@ -150,9 +149,7 @@ async page => {
   await page.locator('#taskDetail').getByRole('tab', {name: /^讨论/}).click();
   if (!await page.locator('#debate-11 .markdown-body strong').count() || !await page.locator('#debate-11 ul ul').count()) throw Error('任务讨论没有排版');
   await page.locator('#navCommunity').click();
-  await page.locator('#topicList button').click();
-  await page.locator('#topicDetail .markdown-body strong').waitFor();
-  if (!await page.locator('#topic-reply-1 em').count() || !await page.locator('#messages .markdown-body strong').count()) throw Error('话题回复或频道消息没有排版');
+  await page.locator('#messages .markdown-body strong').waitFor();
   if (await page.locator('#messages .markdown-video-embed').count() !== 1) throw Error('频道讨论中的 B 站链接没有生成播放器');
   const discussionEmbed = page.locator('#messages .markdown-video-embed');
   const fallbackRequest = page.waitForRequest(request => request.url().startsWith('https://player.bilibili.com/player.html'));
@@ -163,7 +160,6 @@ async page => {
   const retriedRequest = page.waitForRequest(request => request.url().startsWith('https://player.bilibili.com/player.html'));
   await discussionEmbed.locator('summary').click();
   if (!(await retriedRequest).url().includes('&cid=168325345') || metadataRequests.filter(p => p === '1').length !== 2) throw Error('讨论区播放器未重试视频信息请求');
-  if (!(await page.locator('#topicDetail .markdown-body').first().textContent()).includes('🎉')) throw Error('话题中的 Emoji 没有显示');
 
   await page.locator('#workspaceMenu > summary').click();
   await page.locator('#workspaceMenu [data-settings="guide"]').click();

@@ -1,8 +1,7 @@
-// 从任务当前安排和实际参与记录呈现角色，不据此推断账号权限。
-const CLAIM_ROLES = { researcher: '研究员', checker: '核查员', challenger: '红队', supplementer: '补充者' };
+// 精简任务参与角色呈现：聚焦真正影响权责的 5–6 类核心角色，避免碎片化清单。
 const SUBTASK_STATES = { assigned: '待接单', accepted: '已接单', waiting: '等待事件', submitted: '待核查', done: '已完成' };
 
-export function renderTaskRoles(data, {node, agents = []}) {
+export function renderTaskRoles(data, {node, agents = [], renderAgentName = null}) {
   const task = data.task || {}, work = data.workflow || {};
   const plan = work.plan || data.plan || task.plan;
   const names = new Map(agents.map(person => [person.id, person.name]));
@@ -33,36 +32,56 @@ export function renderTaskRoles(data, {node, agents = []}) {
     if (note) member.notes.add(note);
   }
 
-  add('发布者', task.created_by);
-  add('提案人', task.proposed_by);
-  add('主持人', work.host, {id: work.host_id, empty: plan?.collaboration === 'hosted' ? '未指定' : ''});
-  if(!work.discussion) add('认领者', task.claimed_by, {note: CLAIM_ROLES[task.claimed_role] || '', empty: task.status === 'open' ? '待认领' : ''});
-  else add('截止总结负责人',work.discussion.summary_author,{id:work.discussion.summary_author_id,empty:'参与后确定；管理员可代为总结'});
-  add('主要作者', work.report_author, {id: work.report_author_id || plan?.delivery?.author_id, empty: plan?.delivery?.format === 'web_report' ? '未指定' : ''});
-  const outcome = work.outcomes?.[0];
-  if (outcome) add('成果提交者', outcome.author, {id: outcome.author_id});
+  // 1. 发布与提案
+  add('发布者', task.created_by, {note: task.proposed_by && task.proposed_by === task.created_by ? 'Agent 提案' : ''});
+  if (task.proposed_by && task.proposed_by !== task.created_by) add('发布者', task.proposed_by, {note: '提案人'});
 
-  for (const subtask of work.subtasks || []) {
-    if (subtask.state === 'declined') continue;
-    add('子任务执行者', subtask.assignee, {id: subtask.assignee_id, note: `${subtask.title || `子任务 #${subtask.id}`} · ${SUBTASK_STATES[subtask.state] || subtask.state}`});
-    add('子任务核查者', subtask.reviewer, {id: subtask.reviewer_id});
+  // 2. 负责人（主持人 / 认领者 / 激辩总结负责人）
+  if (work.discussion) {
+    const recapNote = work.discussion.recap_count ? `已总结 ${work.discussion.recap_count} 次` : '阶段与截止总结';
+    add('总结负责', work.discussion.summary_author, {id: work.discussion.summary_author_id, note: recapNote, empty: '参与后确定；管理员可代为总结'});
+  } else {
+    if (plan?.collaboration === 'hosted' || work.host_id || work.host) {
+      add('负责人', work.host, {id: work.host_id, note: '主持', empty: '主持待指定'});
+    }
+    if (task.claimed_by) {
+      add('负责人', task.claimed_by, {note: '认领'});
+    } else if (plan?.collaboration !== 'hosted' && !work.host_id && task.status === 'open') {
+      add('负责人', '', {empty: '待认领'});
+    }
   }
+
+  // 3. 主要作者 / 成果提交者
+  const outcome = work.outcomes?.[0];
+  if (work.report_author || work.report_author_id || plan?.delivery?.author_id || plan?.delivery?.format === 'web_report') {
+    add('主要作者', work.report_author, {id: work.report_author_id || plan?.delivery?.author_id, empty: plan?.delivery?.format === 'web_report' ? '未指定' : ''});
+  }
+  if (outcome) add('主要作者', outcome.author, {id: outcome.author_id, note: '已交成果'});
+
+  // 4. 独立核查者（含当前版 / 历史版与问题确认）
   const current = work.current_reviews || [];
-  for (const review of current) add('独立核查者', review.reviewer, {id: review.reviewer_id, note: '当前版本'});
+  for (const review of current) add('独立核查', review.reviewer, {id: review.reviewer_id, note: '当前版本'});
   for (const review of work.reviews || []) {
     if (current.some(row => review.reviewer_id && row.reviewer_id ? review.reviewer_id === row.reviewer_id : review.reviewer === row.reviewer)) continue;
-    add('独立核查者', review.reviewer, {id: review.reviewer_id, note: '历史核查记录'});
+    add('独立核查', review.reviewer, {id: review.reviewer_id, note: '历史核查'});
   }
-  for (const row of data.challenges || []) add('质疑者', row.agent);
-  for (const row of data.supplements || []) add('补充者', row.agent);
   for (const issue of work.issues || []) {
-    // 旧质疑自动映射为问题，不再把同一条行动记为另一个角色。
-    if (!issue.challenge_id && (issue.author_id || issue.author !== '历史记录')) add('问题提出者', issue.author, {id: issue.author_id});
-    add('问题回应者', issue.responder, {id: issue.responder_id});
-    add('问题确认者', issue.resolver, {id: issue.resolver_id});
+    if (issue.resolver) add('独立核查', issue.resolver, {id: issue.resolver_id, note: '确认问题'});
   }
-  for (const row of data.debate || []) add('讨论参与者', row.agent, {note: row.stance?.replace('反駁', '反驳').replace('補充', '补充')});
-  for (const row of data.force_approvals || []) add('强制验收者', row.agent);
+
+  // 5. 子任务分工（仅当有未退出的子任务时显示）
+  for (const subtask of work.subtasks || []) {
+    if (subtask.state === 'declined') continue;
+    add('子任务分工', subtask.assignee, {id: subtask.assignee_id, note: `${subtask.title || `子任务 #${subtask.id}`} · ${SUBTASK_STATES[subtask.state] || subtask.state}`});
+  }
+
+  // 6. 讨论与反馈（合并讨论、问题、旧质疑与补充）
+  for (const row of data.debate || []) add('讨论参与', row.agent, {note: row.stance?.replace('反駁', '反驳').replace('補充', '补充')});
+  for (const issue of work.issues || []) {
+    if (!issue.challenge_id && (issue.author_id || issue.author !== '历史记录')) add('讨论参与', issue.author, {id: issue.author_id, note: '提出问题'});
+  }
+  for (const row of data.challenges || []) add('讨论参与', row.agent, {note: '质疑'});
+  for (const row of data.supplements || []) add('讨论参与', row.agent, {note: '补充'});
 
   const root = node('section', null, 'work-section task-roles');
   const heading = node('h4', '参与角色');
@@ -79,8 +98,11 @@ export function renderTaskRoles(data, {node, agents = []}) {
       const people = node('ul', null, 'task-role-members');
       for (const person of members) {
         const member = node('li', null, 'task-role-member');
-        member.append(node('span', person.name, 'task-role-name'));
-        if (person.notes.size) member.append(node('small', [...person.notes].join('；'), 'muted'));
+        const nameEl = renderAgentName
+          ? renderAgentName(person.name, { id: person.id, className: 'task-role-name' })
+          : node('span', person.name, 'task-role-name');
+        member.append(nameEl);
+        if (person.notes.size) member.append(node('small', [...person.notes].join('、'), 'muted'));
         people.append(member);
       }
       value.append(people);

@@ -4,8 +4,18 @@ import worker from '../src/index.js';
 
 export function createMemoryR2() {
   const store = new Map();
+  const stats = { headCalls: 0, getCalls: 0 };
+  const metadataOf = entry => ({
+    key: entry.key,
+    size: entry.size,
+    httpEtag: entry.httpEtag,
+    httpMetadata: entry.httpMetadata,
+    customMetadata: entry.customMetadata,
+    uploaded: entry.uploaded,
+  });
   return {
     store,
+    stats,
     async put(key, value, options = {}) {
       let bytes;
       if (value instanceof Uint8Array) bytes = new Uint8Array(value);
@@ -24,27 +34,48 @@ export function createMemoryR2() {
       store.set(key, entry);
       return entry;
     },
-    async get(key) {
+    async head(key) {
+      stats.headCalls++;
+      const entry = store.get(key);
+      return entry ? metadataOf(entry) : null;
+    },
+    async get(key, options = {}) {
+      stats.getCalls++;
       const entry = store.get(key);
       if (!entry) return null;
+      let slice = entry.bytes;
+      let rangeMeta = undefined;
+      if (options?.range) {
+        const r = options.range;
+        let start = 0;
+        let end = entry.size;
+        if (typeof r.suffix === 'number') {
+          if (r.suffix <= 0) throw new Error('R2 mock: invalid suffix range');
+          start = Math.max(0, entry.size - r.suffix);
+        } else {
+          start = r.offset ?? 0;
+          end = r.length != null ? start + r.length : entry.size;
+        }
+        if (start < 0 || start >= entry.size || end <= start || end > entry.size) {
+          throw new Error(`R2 mock: range out of bounds (${start}-${end} of ${entry.size})`);
+        }
+        slice = entry.bytes.subarray(start, end);
+        rangeMeta = { offset: start, length: slice.byteLength };
+      }
       return {
-        key: entry.key,
-        size: entry.size,
-        httpEtag: entry.httpEtag,
-        httpMetadata: entry.httpMetadata,
-        customMetadata: entry.customMetadata,
-        uploaded: entry.uploaded,
+        ...metadataOf(entry),
+        ...(rangeMeta ? { range: rangeMeta } : {}),
         body: new ReadableStream({
           start(controller) {
-            controller.enqueue(entry.bytes);
+            controller.enqueue(slice);
             controller.close();
           },
         }),
         async arrayBuffer() {
-          return entry.bytes.buffer.slice(entry.bytes.byteOffset, entry.bytes.byteOffset + entry.bytes.byteLength);
+          return slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
         },
         async text() {
-          return new TextDecoder().decode(entry.bytes);
+          return new TextDecoder().decode(slice);
         },
       };
     },

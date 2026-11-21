@@ -47,17 +47,39 @@ async function videoSource(source) {
   }
 }
 
-export function createReadingUI({node}) {
+export function createReadingUI({node, openPreview = null}) {
   const urlPattern = /https?:\/\/[^\s<>"'`]+/gi;
   function link(url, label) {
     const a = node('a', label, 'plain-link');
     a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = url;
     return a;
   }
+  function bindZoomableImages(root) {
+    if (typeof openPreview !== 'function') return;
+    for (const img of root.querySelectorAll('.markdown-image img')) {
+      if (img.closest('a')) continue;
+      const caption = img.getAttribute('alt') || '图片预览';
+      img.classList.add('is-zoomable');
+      img.tabIndex = 0;
+      img.setAttribute('role', 'button');
+      img.setAttribute('aria-label', `放大查看图片：${caption}`);
+      img.title = '点击放大查看';
+      const trigger = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPreview({ title: caption, url: img.getAttribute('src') || img.src, content_type: 'image/*' });
+      };
+      img.addEventListener('click', trigger);
+      img.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') trigger(event);
+      });
+    }
+  }
   function markdown(value, className = '') {
     const box = node('div', null, `markdown-body ${className}`.trim());
     // The shared parser disables raw HTML and validates every link protocol.
     box.innerHTML = renderMarkdown(value);
+    bindZoomableImages(box);
     for (const embed of box.querySelectorAll('.markdown-video-embed')) {
       embed.addEventListener('toggle', async () => {
         const slot = embed.querySelector('.markdown-video-frame');
@@ -88,6 +110,29 @@ export function createReadingUI({node}) {
     }
     return box;
   }
+  function buildRichPreview(full) {
+    const preview = node('div', null, 'markdown-body text-preview text-preview-rich');
+    const clone = full.cloneNode(true);
+    // Replace heavy/interactive media in collapsed preview with compact non-loading chips
+    // so embeds never load or duplicate controls before the reader expands full text.
+    for (const embed of clone.querySelectorAll('.markdown-video-embed')) {
+      const label = embed.querySelector('summary')?.textContent?.trim() || '展开查看视频';
+      embed.replaceWith(node('p', `🎬 ${label}`, 'text-preview-media-chip'));
+    }
+    for (const media of clone.querySelectorAll('.markdown-video, .markdown-audio')) {
+      const isAudio = media.classList.contains('markdown-audio');
+      const label = media.querySelector('.markdown-media-caption')?.textContent?.trim() || (isAudio ? '音频' : '视频');
+      media.replaceWith(node('p', `${isAudio ? '🎧 音频' : '🎬 视频'} · ${label}`, 'text-preview-media-chip'));
+    }
+    for (const img of clone.querySelectorAll('.markdown-image img')) {
+      img.classList.remove('is-zoomable');
+      img.removeAttribute('tabindex');
+      img.removeAttribute('role');
+    }
+    preview.append(...clone.childNodes);
+    bindZoomableImages(preview);
+    return preview;
+  }
   function sources(value, {label = '来源', exclude = []} = {}) {
     const text = String(value || ''), excluded = new Set(exclude.filter(Boolean));
     const allLinks = markdownLinks(text), urls = allLinks.filter(({url}) => !excluded.has(url));
@@ -110,11 +155,7 @@ export function createReadingUI({node}) {
     if (Array.from(valueText).length <= limit && valueText.split('\n').length <= 7) return markdown(valueText, className);
     const box = node('div', null, `readable-text ${className}`);
     const full = markdown(valueText, 'full-text');
-    // Take preview text from parsed content so a cutoff never leaves visible
-    // Markdown delimiters or a broken table/code fence in the collapsed view.
-    const firstParagraph = full.querySelector('p')?.textContent.trim() || '';
-    const previewText = firstParagraph.length >= 16 && Array.from(firstParagraph).length < limit ? firstParagraph : Array.from(full.textContent).slice(0, limit).join('').trimEnd();
-    const preview = node('p', previewText + '…', 'text-preview');
+    const preview = buildRichPreview(full);
     const fold = node('details', null, 'text-fold'), summary = node('summary', '展开全文');
     fold.append(summary, full);
     fold.addEventListener('toggle', () => {

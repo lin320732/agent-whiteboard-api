@@ -1,4 +1,4 @@
-export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
+export function createAgentGuideUI({api,node,button,markdown,user,notify,loadAgents=()=>api('/api/admin/agents')}) {
   let latest=null,base=null,editor=null,error=null,stale=null,current=null,preview=null,version=null,bootstrap=null,epoch=0;
   let scope=null,scopeSelect=null,scopeNote=null;
   const root=()=>document.getElementById('agentGuide');
@@ -20,6 +20,10 @@ export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
     if(!blocks.length) blocks.push(markdown('目前未追加工作指示，Agent 按内置指南工作。'));
     current.replaceChildren(...blocks);
   }
+  function publicationLabel(label, {revision,updated_at}) {
+    const date=updated_at?`（${new Date(updated_at).toLocaleString()}）`:'';
+    return `${label}第 ${revision} 版${date}`;
+  }
   function apply(guide) {
     const dirty=editor&&base&&editor.value!==textOf(base);
     latest=guide;
@@ -32,7 +36,7 @@ export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
       connection.append(node('summary','让 Agent 自己读取指南'));
       const label=node('label','只需设置一次的接入指令');
       bootstrap=node('textarea');bootstrap.readOnly=true;bootstrap.rows=3;label.append(bootstrap);
-      connection.append(label,button('复制接入指令',async()=>{
+      connection.append(label,node('p','检查接入指令中的读写范围后，在你自己的 Agent 对话发送。范围内的普通操作可继续，平台要求批准时仍按实际提示处理；指南更新不会扩大授权。','muted'),button('复制接入指令',async()=>{
         try {await navigator.clipboard.writeText(latest.bootstrap);notify('接入指令已复制');}
         catch {bootstrap.focus();bootstrap.select();notify('请复制已选中的接入指令');}
       }));
@@ -73,7 +77,14 @@ export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
       }
       target.append(button('读取最新指南',refresh));
     }
-    version.textContent=`版本 ${guide.version.slice(0,12)}${guide.updated_at?` · ${new Date(guide.updated_at).toLocaleString()}`:' · 内置指南'}${scope?` · ${scopeName()}`:''}`;
+    const shared=guide.shared||{revision:guide.revision,updated_at:guide.updated_at};
+    const labels=[`指南版本 ${guide.version.slice(0,12)}`];
+    if(shared.revision) labels.push(publicationLabel('共用指示',shared));
+    if(scope) {
+      labels.push(scopeName());
+      if(guide.personal) labels.push(publicationLabel('专属指示',guide.personal));
+    }
+    version.textContent=labels.join(' · ');
     renderCurrent(guide);
     preview.replaceChildren(markdown(guide.markdown));bootstrap.value=guide.bootstrap;
     if(editor) {
@@ -86,8 +97,10 @@ export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
     return scopeSelect?.selectedOptions?.[0]?.textContent||`Agent ${scope}`;
   }
   async function fillScopes() {
+    const select=scopeSelect,identity=user()?.id;
     try {
-      const data=await api('/api/admin/agents');
+      const data=await loadAgents();
+      if(scopeSelect!==select||user()?.id!==identity||!select?.isConnected) return;
       const agents=(data.accounts||data.agents||[]).filter(a=>a.kind!=='human');
       if(!agents.length) {scopeSelect.parentElement?.remove();scopeNote?.remove();return;}
       scopeSelect.append(node('option','全体 Agent（共用指示）'));
@@ -98,6 +111,7 @@ export function createAgentGuideUI({api,node,button,markdown,user,notify}) {
       }
       scopeSelect.value='';
     } catch {
+      if(scopeSelect!==select||user()?.id!==identity) return;
       scopeSelect.parentElement?.remove();scopeNote?.remove();
     }
   }

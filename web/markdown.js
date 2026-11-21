@@ -156,6 +156,85 @@ markdown.core.ruler.after('inline', 'task-list', state => {
   }
 });
 
+const CALLOUT_KINDS = {
+  note: {kind: 'note', icon: 'ℹ️', label: '说明'},
+  info: {kind: 'note', icon: 'ℹ️', label: '说明'},
+  '说明': {kind: 'note', icon: 'ℹ️', label: '说明'},
+  '背景': {kind: 'note', icon: '📌', label: '背景'},
+  '证据': {kind: 'note', icon: '🔍', label: '证据'},
+  tip: {kind: 'tip', icon: '💡', label: '建议'},
+  '建议': {kind: 'tip', icon: '💡', label: '建议'},
+  '结论': {kind: 'tip', icon: '🎯', label: '结论'},
+  '要点': {kind: 'tip', icon: '✨', label: '要点'},
+  important: {kind: 'important', icon: '📌', label: '重点'},
+  '重点': {kind: 'important', icon: '📌', label: '重点'},
+  warning: {kind: 'warning', icon: '⚠️', label: '注意'},
+  '注意': {kind: 'warning', icon: '⚠️', label: '注意'},
+  '存疑': {kind: 'warning', icon: '⚠️', label: '存疑'},
+  caution: {kind: 'caution', icon: '🚨', label: '风险'},
+  '风险': {kind: 'caution', icon: '🚨', label: '风险'},
+  '质疑': {kind: 'caution', icon: '⚡', label: '质疑'},
+  '反驳': {kind: 'caution', icon: '⚡', label: '反驳'},
+  '问题': {kind: 'caution', icon: '🚨', label: '问题'},
+};
+
+// Support GitHub-style and Chinese Callout blocks:
+// > [!TIP] 自定义标题
+// > 正文内容
+markdown.core.ruler.after('emoji', 'callout', state => {
+  for (let i = 0; i < state.tokens.length - 3; i++) {
+    if (state.tokens[i].type !== 'blockquote_open') continue;
+    if (state.tokens[i + 1].type !== 'paragraph_open' || state.tokens[i + 2].type !== 'inline' || state.tokens[i + 3].type !== 'paragraph_close') continue;
+    const inline = state.tokens[i + 2];
+    const children = inline.children || [];
+    const first = children[0];
+    if (first?.type !== 'text') continue;
+    const marker = /^\[!([A-Za-z\u4e00-\u9fff]+)\](?:[ \t]+([\s\S]*))?$/.exec(first.content);
+    if (!marker) continue;
+    const rawKey = marker[1];
+    const spec = CALLOUT_KINDS[rawKey] || CALLOUT_KINDS[rawKey.toLowerCase()];
+    if (!spec) continue;
+
+    const breakIdx = children.findIndex(token => token.type === 'softbreak' || token.type === 'hardbreak');
+    const hasMoreBlocks = state.tokens[i + 4]?.type !== 'blockquote_close';
+    const firstRest = marker[2] || '';
+    let title = spec.label;
+
+    if (breakIdx !== -1) {
+      const restTokens = children.slice(1, breakIdx);
+      const customTitle = (firstRest + (restTokens.length ? inlineText(restTokens) : '')).trim();
+      if (customTitle) title = customTitle;
+      inline.children = children.slice(breakIdx + 1);
+    } else if (hasMoreBlocks) {
+      const restTokens = children.slice(1);
+      const customTitle = (firstRest + (restTokens.length ? inlineText(restTokens) : '')).trim();
+      if (customTitle) title = customTitle;
+      inline.children = [];
+    } else {
+      // Single-line callout (e.g. "> [!结论] 方案 A 更划算"): keep marker label as title and remaining text as body.
+      first.content = firstRest.trimStart();
+      if (!first.content) inline.children = children.slice(1);
+    }
+
+    state.tokens[i].attrJoin('class', `markdown-callout markdown-callout-${spec.kind}`);
+    const titleToken = new state.Token('callout_title', '', 0);
+    titleToken.block = true;
+    titleToken.meta = {icon: spec.icon, title};
+    if (!inline.children.length) {
+      state.tokens.splice(i + 1, 3, titleToken);
+    } else {
+      state.tokens.splice(i + 1, 0, titleToken);
+    }
+    i++;
+  }
+});
+
+markdown.renderer.rules.callout_title = (tokens, index) => {
+  const {icon, title} = tokens[index].meta;
+  const escape = markdown.utils.escapeHtml;
+  return `<p class="markdown-callout-title"><span class="markdown-callout-icon" aria-hidden="true">${escape(icon)}</span><span>${escape(title)}</span></p>\n`;
+};
+
 // A video link on its own paragraph becomes a block, so the expandable player
 // never ends up inside a <p> or starts loading while the board is being read.
 markdown.core.ruler.after('emoji', 'platform-video', state => {

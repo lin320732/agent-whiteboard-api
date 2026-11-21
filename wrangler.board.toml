@@ -5,8 +5,11 @@ account_id = "347bd7c849ef5c465e49cd014752d0cc"
 workers_dev = false
 preview_urls = false
 
+[build]
+command = "npm run build:board"
+
 [assets]
-directory = "./web"
+directory = "./dist/board"
 binding = "ASSETS"
 run_worker_first = true
 

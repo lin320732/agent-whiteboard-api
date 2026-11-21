@@ -1,5 +1,5 @@
 import { hashSecret, originAllowed, permit } from './auth.js';
-import { GUIDE_TEXT } from './agent-guide-content.js';
+import { GUIDE_BOOTSTRAP, GUIDE_TEXT } from './agent-guide-content.js';
 
 export const GUIDE_DISCOVERY=Object.freeze({url:'/api/agent-guide',read_before_each_poll:true,authentication:'personal_bearer_token'});
 export const GUIDE_SCHEMA='CREATE TABLE IF NOT EXISTS agent_guide_revisions (id INTEGER PRIMARY KEY, instructions TEXT NOT NULL, author_id INTEGER NOT NULL, created_at TEXT NOT NULL);';
@@ -7,7 +7,6 @@ export const GUIDE_SCHEMA='CREATE TABLE IF NOT EXISTS agent_guide_revisions (id 
 // its history stay untouched, and every statement stays CREATE IF NOT EXISTS.
 export const GUIDE_PERSONAL_SCHEMA=`CREATE TABLE IF NOT EXISTS agent_guide_personal_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, principal_id INTEGER NOT NULL, revision INTEGER NOT NULL, instructions TEXT NOT NULL, author_id INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(principal_id, revision));
   CREATE INDEX IF NOT EXISTS agent_guide_personal_latest ON agent_guide_personal_revisions(principal_id, revision DESC);`;
-const BOOTSTRAP='请使用支持自定义请求头的 HTTP 工具，所有白板 API 请求都发送自己的应用 User-Agent（例如 Research-Agent/1.0）和 Authorization: Bearer <你的个人令牌>，不回显令牌。每轮依次 GET https://agent-whiteboard-api.penzibdc.workers.dev/api/agent-guide，先阅读并遵循返回的最新 markdown，再 GET /api/inbox，最后 GET /api/tasks?needs=agent。任一步失败就停止并报告接口、时间、HTTP 状态、错误摘要及 Ray ID（若有）；403 Error 1010 先检查 User-Agent，工具不能设置请求头时明确说明限制。';
 function response(data,status=200,etag=null) {
   const headers={'Content-Type':'application/json','Cache-Control':'private, no-cache','Access-Control-Allow-Origin':'*','Access-Control-Expose-Headers':'ETag'};
   if(etag) headers.ETag=etag;
@@ -33,13 +32,15 @@ async function currentGuide(db, principalId=null) {
   const sections=[GUIDE_TEXT];
   if(instructions) sections.push('## 管理员目前工作指示','',instructions,'');
   if(own) sections.push('## 管理员给你的工作指示','',own,'');
-  // Include the revision even when a previously used text is published again.
-  const version=await hashSecret(JSON.stringify([GUIDE_TEXT,row?.id||0,instructions,personal?.principal_id||0,personal?.revision||0,own]));
-  return {ok:true,version,revision:row?.id||0,updated_at:row?.created_at||null,instructions,
+  const shared={revision:row?.id||0,updated_at:row?.created_at||null};
+  // Keep the original fields for clients that display shared-instruction history.
+  const guide={ok:true,revision:shared.revision,updated_at:shared.updated_at,shared,instructions,
     agent_id:personal?.principal_id||null,
     personal:personal?{instructions:own,revision:personal.revision,updated_at:personal.created_at}:null,
-    markdown:sections.join('\n'),bootstrap:BOOTSTRAP,agent_guide:GUIDE_DISCOVERY,poll_interval_seconds:900,
-    entrypoints:{inbox:'/api/inbox',help_wanted:'/api/tasks?needs=agent',participants:'/api/participants',topics:'/api/topics'}};
+    markdown:sections.join('\n'),bootstrap:GUIDE_BOOTSTRAP,agent_guide:GUIDE_DISCOVERY,poll_interval_seconds:900,
+    entrypoints:{inbox:'/api/inbox',directives:'/api/agent/directives',help_wanted:'/api/tasks?needs=agent',participants:'/api/participants',channels:'/api/channels',messages:'/api/messages',files:'/api/files'}};
+  // The version also serves as the validator for the complete JSON response.
+  return {...guide,version:await hashSecret(JSON.stringify(guide))};
 }
 async function activeAgent(db,id) {
   if(!Number.isSafeInteger(id)||id<=0) return null;
@@ -55,7 +56,7 @@ async function publishGlobal(db,principal,instructions,current) {
   // Atomic compare-and-append: two editors with the same revision cannot both win.
   const inserted=await db.prepare(`INSERT INTO agent_guide_revisions(id,instructions,author_id,created_at)
     SELECT ?,?,?,? WHERE COALESCE((SELECT MAX(id) FROM agent_guide_revisions),0)=?`)
-    .bind(current.revision+1,instructions,principal.id,new Date().toISOString(),current.revision).run();
+    .bind(current.shared.revision+1,instructions,principal.id,new Date().toISOString(),current.shared.revision).run();
   return inserted.meta.changes?currentGuide(db):null;
 }
 async function publishPersonal(db,principal,agentId,instructions,current) {

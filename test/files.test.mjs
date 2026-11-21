@@ -196,13 +196,276 @@ test('POST /api/tasks/:id/outcomes accepts inline report.html, auto-hosts in R2,
   const readyDetail = (await f.request('GET', `/api/tasks/${taskId}`, undefined, f.admin)).data;
   assert.equal(readyDetail.verify_readiness.ready, true);
 
-  // Stored file is also linked to taskId
+  // Stored file is also linked to taskId and includes convenience URLs + markdown embed + task_title + path
   const taskFiles = await f.request('GET', `/api/files?task_id=${taskId}`, undefined, f.admin);
   assert.equal(taskFiles.data.files.length, 1);
   assert.equal(taskFiles.data.files[0].url, outcome.data.report.url);
+  assert.equal(taskFiles.data.files[0].raw_url, outcome.data.report.url);
+  assert.equal(taskFiles.data.files[0].json_url, `${outcome.data.report.url}?format=json`);
+  assert.equal(taskFiles.data.files[0].size_bytes, taskFiles.data.files[0].size);
+  assert.equal(taskFiles.data.files[0].task_title, 'Muse 芯片行业 HTML 报告');
+  assert.match(taskFiles.data.files[0].path, /^\/api\/files\/f_[A-Za-z0-9_-]+\/task-\d+-v1\.html$/);
+  assert.ok(taskFiles.data.files[0].markdown_embed.includes(outcome.data.report.url));
+
+  // Service-binding requests arriving with api.internal resolve public URLs instead of api.internal
+  const proxiedReq = new Request('https://api.internal/api/files', { headers: f.worker.auth });
+  const proxiedRes = await worker.fetch(proxiedReq, { ...f.env, PUBLIC_API_ORIGIN: 'https://public-api.example.test' }, {});
+  assert.equal(proxiedRes.status, 200);
+  const proxiedData = await proxiedRes.json();
+  assert.ok(proxiedData.files[0].url.startsWith('https://public-api.example.test/api/files/f_'));
+  assert.ok(!proxiedData.files[0].url.includes('api.internal'));
+  assert.ok(proxiedData.files[0].path.startsWith('/api/files/f_'));
+
+  // Image and video uploads generate proper markdown_embed helpers
+  const img = await f.request('POST', '/api/files', {
+    filename: 'trend.png',
+    title: '趋势图',
+    content_type: 'image/png',
+    base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNIWPDgPwAGJALgx/BMsgAAAABJRU5ErkJggg==',
+    scope: 'media',
+  }, f.worker.auth);
+  assert.equal(img.status, 201);
+  assert.equal(img.data.markdown_embed, `![趋势图](${img.data.url})`);
+  assert.equal(img.data.json_url, `${img.data.url}?format=json`);
 
   // Migration file is repeatable
   const sql = readFileSync(new URL('../migrations/0013-stored-files.sql', import.meta.url), 'utf8');
   f.DB.sqlite.exec(sql);
   f.DB.sqlite.exec(sql);
+});
+
+test('public file fast path performs zero D1 reads/writes even with session cookie or Agent bearer and works during D1 outage', async () => {
+  const f = await fixture();
+  const uploaded = await f.request('POST', '/api/files', {
+    filename: 'report-fast.html',
+    title: '快路径报告',
+    html: '<!DOCTYPE html><html><body><h1>Fast Path</h1></body></html>',
+    scope: 'standalone',
+  }, f.worker.auth);
+  assert.equal(uploaded.status, 201);
+  const filePath = uploaded.data.path;
+
+  const visitsBefore = f.DB.sqlite.prepare('SELECT COUNT(*) AS n FROM agent_visits').get().n;
+  const origPrepare = f.DB.prepare.bind(f.DB);
+  let totalDbQueries = 0;
+  f.DB.prepare = sql => {
+    totalDbQueries++;
+    return origPrepare(sql);
+  };
+
+  try {
+    // 1. Anonymous, admin session cookie (dashboard gallery), and Agent bearer (Muse fetching) all hit 0 D1 queries
+    for (const headers of [
+      {},
+      { Cookie: f.admin.Cookie },
+      { ...f.checker.auth },
+    ]) {
+      const getRes = await worker.fetch(new Request(`https://board.test${filePath}`, { headers }), f.env, {});
+      assert.equal(getRes.status, 200);
+      assert.equal(getRes.headers.get('Accept-Ranges'), 'bytes');
+      assert.match(getRes.headers.get('Content-Security-Policy'), /sandbox allow-scripts/);
+      assert.match(await getRes.text(), /Fast Path/);
+
+      const headRes = await worker.fetch(new Request(`https://board.test${filePath}`, { method: 'HEAD', headers }), f.env, {});
+      assert.equal(headRes.status, 200);
+      assert.equal(await headRes.text(), '');
+
+      const jsonRes = await worker.fetch(new Request(`https://board.test${filePath}?format=json`, { headers }), f.env, {});
+      assert.equal(jsonRes.status, 200);
+      assert.equal(jsonRes.headers.get('Cache-Control'), 'no-store');
+      assert.equal(jsonRes.headers.get('ETag'), null);
+      const jsonBody = await jsonRes.json();
+      assert.equal(jsonBody.file.title, '快路径报告');
+      assert.equal(jsonBody.file.scope, 'standalone');
+      assert.match(jsonBody.file.content, /Fast Path/);
+    }
+    assert.equal(totalDbQueries, 0, 'Public file GET/HEAD/?format=json on R2 hit must execute 0 D1 queries');
+  } finally {
+    f.DB.prepare = origPrepare;
+  }
+
+  const visitsAfter = f.DB.sqlite.prepare('SELECT COUNT(*) AS n FROM agent_visits').get().n;
+  assert.equal(visitsAfter, visitsBefore, 'Public file reads with Agent bearer must not pollute agent_visits');
+
+  // 2. R2 hit still serves cleanly even when D1 is offline
+  const brokenEnv = {
+    ...f.env,
+    DB: { prepare() { throw new Error('D1 quota exhausted'); }, exec() { throw new Error('D1 quota exhausted'); } },
+  };
+  const duringOutage = await worker.fetch(new Request(`https://board.test${filePath}`), brokenEnv, {});
+  assert.equal(duringOutage.status, 200);
+  assert.match(await duringOutage.text(), /Fast Path/);
+
+  // 3. Short link without filename falls back to D1 cleanly; fails with 503 if D1 is offline
+  const shortUrl = `https://board.test/api/files/${uploaded.data.id}`;
+  const shortOk = await worker.fetch(new Request(shortUrl), f.env, {});
+  assert.equal(shortOk.status, 200);
+  assert.match(await shortOk.text(), /Fast Path/);
+  const shortOutage = await worker.fetch(new Request(shortUrl), brokenEnv, {});
+  assert.equal(shortOutage.status, 503);
+});
+
+test('serveFile supports Range 206/416, HEAD without stream, If-None-Match 304 (RFC 9110 §14.2 precedence), and metadata fallback', async () => {
+  const f = await fixture();
+  // Minimal 64-byte synthetic MP4 fixture (ftyp + mdat header + deterministic payload)
+  const mp4 = new Uint8Array(64);
+  mp4.set([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00], 0);
+  for (let i = 16; i < 64; i++) mp4[i] = i;
+
+  const putRes = await worker.fetch(new Request('https://board.test/api/files/clip.mp4?scope=media&title=测试短片', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'video/mp4', ...f.worker.auth },
+    body: mp4,
+  }), f.env, {});
+  assert.equal(putRes.status, 201);
+  const uploaded = await putRes.json();
+  const fileUrl = uploaded.url;
+
+  // 1. Plain unconditional GET uses 1 R2 get and 0 R2 head
+  f.FILES.stats.headCalls = 0;
+  f.FILES.stats.getCalls = 0;
+  const fullRes = await worker.fetch(new Request(fileUrl), f.env, {});
+  assert.equal(fullRes.status, 200);
+  assert.equal(fullRes.headers.get('Accept-Ranges'), 'bytes');
+  assert.equal(fullRes.headers.get('Content-Length'), '64');
+  const etag = fullRes.headers.get('ETag');
+  assert.ok(etag);
+  assert.deepEqual(new Uint8Array(await fullRes.arrayBuffer()), mp4);
+  assert.equal(f.FILES.stats.headCalls, 0);
+  assert.equal(f.FILES.stats.getCalls, 1);
+
+  // 2. HEAD uses R2 head only (never opens R2 body stream)
+  f.FILES.stats.headCalls = 0;
+  f.FILES.stats.getCalls = 0;
+  const headRes = await worker.fetch(new Request(fileUrl, { method: 'HEAD' }), f.env, {});
+  assert.equal(headRes.status, 200);
+  assert.equal(headRes.headers.get('Accept-Ranges'), 'bytes');
+  assert.equal(headRes.headers.get('Content-Length'), '64');
+  assert.equal(headRes.headers.get('ETag'), etag);
+  assert.equal(await headRes.text(), '');
+  assert.equal(f.FILES.stats.headCalls, 1);
+  assert.equal(f.FILES.stats.getCalls, 0);
+
+  // 3. Valid single byte ranges (start-end, open end, clamped end, suffix, oversized suffix, uint64 max bounds)
+  for (const [header, start, end] of [
+    ['bytes=0-15', 0, 15],
+    ['bytes=16-31', 16, 31],
+    ['bytes=48-', 48, 63],
+    ['bytes=50-9999', 50, 63],
+    ['bytes=0-18446744073709551615', 0, 63],
+    ['bytes=-10', 54, 63],
+    ['bytes=-9999', 0, 63],
+    ['bytes=-18446744073709551615', 0, 63],
+  ]) {
+    f.FILES.stats.headCalls = 0;
+    f.FILES.stats.getCalls = 0;
+    const res = await worker.fetch(new Request(fileUrl, { headers: { Range: header } }), f.env, {});
+    const expectedLen = end - start + 1;
+    assert.equal(res.status, 206, header);
+    assert.equal(res.headers.get('Accept-Ranges'), 'bytes', header);
+    assert.equal(res.headers.get('Content-Range'), `bytes ${start}-${end}/64`, header);
+    assert.equal(res.headers.get('Content-Length'), String(expectedLen), `${header} Content-Length must be slice length, not object.size`);
+    assert.equal(res.headers.get('ETag'), etag, header);
+    assert.equal(res.headers.get('Cache-Control'), 'public, max-age=31536000, immutable', header);
+    assert.deepEqual(new Uint8Array(await res.arrayBuffer()), mp4.subarray(start, end + 1), header);
+    assert.equal(f.FILES.stats.headCalls, 1, header);
+    assert.equal(f.FILES.stats.getCalls, 1, header);
+  }
+
+  // HEAD with Range still returns full metadata (200) without opening R2 body stream
+  f.FILES.stats.headCalls = 0;
+  f.FILES.stats.getCalls = 0;
+  const headWithRange = await worker.fetch(new Request(fileUrl, { method: 'HEAD', headers: { Range: 'bytes=0-15' } }), f.env, {});
+  assert.equal(headWithRange.status, 200);
+  assert.equal(headWithRange.headers.get('Content-Length'), '64');
+  assert.equal(headWithRange.headers.get('Referrer-Policy'), 'no-referrer');
+  assert.equal(f.FILES.stats.headCalls, 1);
+  assert.equal(f.FILES.stats.getCalls, 0);
+
+  // 4. Unsatisfiable ranges return 416 without calling R2 get()
+  for (const badRange of ['bytes=64-', 'bytes=999-1000', 'bytes=18446744073709551615-', 'bytes=30-10', 'bytes=-0']) {
+    f.FILES.stats.headCalls = 0;
+    f.FILES.stats.getCalls = 0;
+    const res = await worker.fetch(new Request(fileUrl, { headers: { Range: badRange } }), f.env, {});
+    assert.equal(res.status, 416, badRange);
+    assert.equal(res.headers.get('Content-Range'), 'bytes */64', badRange);
+    assert.equal(res.headers.get('Cache-Control'), 'no-store', badRange);
+    assert.equal(await res.text(), '', badRange);
+    assert.equal(f.FILES.stats.headCalls, 1, badRange);
+    assert.equal(f.FILES.stats.getCalls, 0, badRange);
+  }
+
+  // 5. Multi-range and non-bytes Range fall back to full 200
+  for (const ignoredRange of ['bytes=0-3, 8-11', 'items=0-5', 'bytes=invalid']) {
+    const res = await worker.fetch(new Request(fileUrl, { headers: { Range: ignoredRange } }), f.env, {});
+    assert.equal(res.status, 200, ignoredRange);
+    assert.equal(res.headers.get('Content-Length'), '64', ignoredRange);
+    assert.deepEqual(new Uint8Array(await res.arrayBuffer()), mp4, ignoredRange);
+  }
+
+  // 6. If-None-Match strong/weak/list/* returns 304 without Content-Length/Content-Disposition and takes precedence over Range
+  for (const headers of [
+    { 'If-None-Match': etag },
+    { 'If-None-Match': `W/${etag}` },
+    { 'If-None-Match': `"other-etag", W/${etag}` },
+    { 'If-None-Match': '*' },
+    { 'If-None-Match': `W/${etag}`, Range: 'bytes=0-15' },
+    { 'If-None-Match': etag, Range: 'bytes=99999-' },
+  ]) {
+    f.FILES.stats.headCalls = 0;
+    f.FILES.stats.getCalls = 0;
+    const res = await worker.fetch(new Request(fileUrl, { headers }), f.env, {});
+    assert.equal(res.status, 304, JSON.stringify(headers));
+    assert.equal(res.headers.get('ETag'), etag);
+    assert.equal(res.headers.get('Cache-Control'), 'public, max-age=31536000, immutable');
+    assert.equal(res.headers.get('Accept-Ranges'), 'bytes');
+    assert.equal(res.headers.get('Content-Length'), null);
+    assert.equal(res.headers.get('Content-Disposition'), null);
+    assert.equal(await res.text(), '');
+    assert.equal(f.FILES.stats.headCalls, 1);
+    assert.equal(f.FILES.stats.getCalls, 0);
+  }
+
+  // 7. Non-matching If-None-Match + valid Range returns 206
+  const mismatchRange = await worker.fetch(new Request(fileUrl, { headers: { 'If-None-Match': '"stale"', Range: 'bytes=0-7' } }), f.env, {});
+  assert.equal(mismatchRange.status, 206);
+  assert.equal(mismatchRange.headers.get('Content-Length'), '8');
+  assert.deepEqual(new Uint8Array(await mismatchRange.arrayBuffer()), mp4.subarray(0, 8));
+
+  // 8. ?format=json ignores Range and If-None-Match, stays no-store without file ETag, and falls back to D1 for legacy objects missing customMetadata
+  const jsonWithHeaders = await worker.fetch(new Request(`${fileUrl}?format=json`, {
+    headers: { 'If-None-Match': etag, Range: 'bytes=0-5' },
+  }), f.env, {});
+  assert.equal(jsonWithHeaders.status, 200);
+  assert.equal(jsonWithHeaders.headers.get('Cache-Control'), 'no-store');
+  assert.equal(jsonWithHeaders.headers.get('ETag'), null);
+  const jsonHead = await worker.fetch(new Request(`${fileUrl}?format=json`, { method: 'HEAD' }), f.env, {});
+  assert.equal(jsonHead.status, 200);
+  assert.equal(await jsonHead.text(), '');
+
+  const storedEntry = f.FILES.store.get(`files/${uploaded.id}/clip.mp4`);
+  storedEntry.customMetadata = {}; // simulate legacy object without R2 customMetadata
+  const legacyJson = await (await worker.fetch(new Request(`${fileUrl}?format=json`), f.env, {})).json();
+  assert.equal(legacyJson.file.title, '测试短片');
+  assert.equal(legacyJson.file.scope, 'media');
+  assert.ok(legacyJson.file.created_at);
+
+  // 9. Malformed percent-encoding returns 400 JSON rather than 500 URIError
+  const malformed = await worker.fetch(new Request(`https://board.test/api/files/${uploaded.id}/%E0%A4%A`), f.env, {});
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.headers.get('X-Content-Type-Options'), 'nosniff');
+  assert.equal((await malformed.json()).ok, false);
+
+  // 10. Oversized filenames (>256 chars / >512 bytes) and mismatched alias filenames return 404 (preventing 1101 errors and alias amplification)
+  const overlong = await worker.fetch(new Request(`https://board.test/api/files/${uploaded.id}/${'a'.repeat(1100)}.mp4`), f.env, {});
+  assert.equal(overlong.status, 404);
+  const wrongAlias = await worker.fetch(new Request(`https://board.test/api/files/${uploaded.id}/wrong-alias.bin`), f.env, {});
+  assert.equal(wrongAlias.status, 404);
+  const shortLinkStillWorks = await worker.fetch(new Request(`https://board.test/api/files/${uploaded.id}`), f.env, {});
+  assert.equal(shortLinkStillWorks.status, 200);
+
+  // 11. Fast path never bypasses auth for listing or deletion
+  assert.equal((await worker.fetch(new Request('https://board.test/api/files'), f.env, {})).status, 401);
+  assert.equal((await worker.fetch(new Request('https://board.test/api/files', { method: 'HEAD' }), f.env, {})).status, 401);
+  assert.equal((await worker.fetch(new Request(`https://board.test/api/files/${uploaded.id}`, { method: 'DELETE' }), f.env, {})).status, 401);
 });

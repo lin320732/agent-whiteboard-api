@@ -3,7 +3,7 @@ async page => {
   let globalText='全体的优先事项：先处理已接单工作', personal='Host 专属：每轮先核对照价表', agentScoped=null, lastPost=null;
   const guide=(kind)=>({ok:true,version:kind==='agent'?'p1':'g1',instructions:globalText,markdown:'# 工作指南\n\n'+globalText+(kind==='agent'?`\n\n## 管理员给你的工作指示\n\n${personal}`:''),
     agent_id:kind==='agent'?2:null,personal:kind==='agent'?{instructions:personal,revision:1,updated_at:null}:null,
-    bootstrap:'每轮先读取 /api/agent-guide，再按最新版行动。',updated_at:null});
+    bootstrap:'每轮先读取 /api/agent-guide，再按最新版行动。',shared:{revision:4,updated_at:'2026-11-20T08:06:56Z'}});
   const respond=(route,data,status=200)=>route.fulfill({status,contentType:'application/json',body:JSON.stringify(data)});
   await page.route('**/api/**',route=>{
     const r=route.request(),raw=r.url(),path=raw.replace(/^https?:\/\/[^/]+/,'').split('?')[0];
@@ -24,6 +24,7 @@ async page => {
   await page.locator('#workspaceMenu > summary').click();
   await page.locator('#workspaceMenu [data-settings="guide"]').click();
   await page.locator('#agentGuide .guide-current').getByText(globalText,{exact:true}).waitFor({timeout:3000});
+  await page.locator('#agentGuide').getByText(/^指南版本 g1 · 共用指示第 4 版/).waitFor({timeout:3000});
   const scope=page.locator('#agentGuide').getByLabel('套用到');
   if((await scope.locator('option').count())!==3) throw Error('范围选项应包含全体与两位 Agent');
   const editor=page.locator('#agentGuide').getByLabel('目前工作指示');
@@ -31,6 +32,7 @@ async page => {
 
   await scope.selectOption('2');
   await page.locator('#agentGuide .guide-current').getByText(personal,{exact:true}).waitFor({timeout:3000});
+  await page.locator('#agentGuide').getByText(/^指南版本 p1 · 共用指示第 4 版.* · Host · 专属指示第 1 版$/).waitFor({timeout:3000});
   await page.locator('#agentGuide .guide-current').getByText(globalText,{exact:true}).waitFor();
   if((await editor.inputValue())!==personal) throw Error('切换范围后应载入该 Agent 的专属指示');
 

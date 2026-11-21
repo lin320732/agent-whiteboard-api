@@ -3,6 +3,7 @@ const ACTIONS = {
   task_verify: ['accept', '验收任务'], task_approve: ['publish', '批准提案'],
   task_reject: ['publish', '驳回提案'], task_reopen: ['assign', '退回待认领'],
   discussion_close: ['accept', '关闭激辩'],
+  discussion_recap_request: ['execute', '请求更新阶段总结'],
   plan: ['assign', '更新目标、验收与执行安排'], host: ['assign', '设置主持与验收'],
   trigger: ['start', '确认执行事件'], wait: ['execute', '设置等待'],
   outcome: ['deliver', '提交成果版本'], issue: ['check', '提出问题'],
@@ -77,6 +78,7 @@ export async function readTaskActivity(db, task) {
       else if (audit.kind === 'wait') description = detail.resume_at ? lines(detail.reason, `计划恢复：${detail.resume_at}`) : detail.resume_at===null ? '恢复任务，结束临时等待' : detail.reason || audit.detail;
       else if (audit.kind === 'issue_response') description = lines(detail.response, detail.evidence);
       else if (audit.kind === 'discussion_close') description = detail.reason || '';
+      else if (audit.kind === 'discussion_recap_request') description = detail.messages_since_recap ? `请求总结此前新增的 ${detail.messages_since_recap} 条讨论` : '请求总结负责人更新阶段总结';
       else if (audit.kind === 'task_verify') description = lines(detail.forced ? `强制验收：${detail.reason}` : '按当前验收条件确认任务完成', detail.outcome_id ? `成果版本 #${detail.outcome_id}` : '', detail.report_revision ? `报告版本 ${detail.report_revision}` : '');
       else description = lines(detail.summary, detail.links, detail.role ? `认领角色：${ROLES[detail.role]||detail.role}` : '', detail.previous_status ? `操作前状态：${STATUSES[detail.previous_status]||detail.previous_status}` : '', detail.note);
     }
@@ -99,7 +101,7 @@ export async function readTaskActivity(db, task) {
   }
   for (const challenge of challenges) add(`challenge:${challenge.id}`, 'check', 'challenge', '提出质疑', {actor: challenge.agent, at: challenge.created_at, description: lines(challenge.reason, challenge.evidence), entityType: 'challenge', entityId: challenge.id});
   for (const supplement of supplements) add(`supplement:${supplement.id}`, 'execute', 'supplement', `补充材料 v${supplement.version}`, {actor: supplement.agent, at: supplement.created_at, description: lines(supplement.summary, supplement.links), entityType: 'supplement', entityId: supplement.id});
-  for (const row of debate) add(`debate:${row.id}`, 'execute', 'debate', `参与讨论${row.stance ? ` · ${row.stance}` : ''}`, {actor: row.agent, at: row.created_at, description: row.content, entityType: 'debate', entityId: row.id});
+  for (const row of debate) add(`debate:${row.id}`, 'execute', 'debate', row.stance === '阶段总结' ? '发表阶段总结' : `参与讨论${row.stance ? ` · ${row.stance}` : ''}`, {actor: row.agent, at: row.created_at, description: row.content, entityType: 'debate', entityId: row.id});
   for (const event of subEvents) {
     const subtask = subtasks.find(row => row.id === event.subtask_id);
     const detail = parse(event.detail);

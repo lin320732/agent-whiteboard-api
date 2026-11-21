@@ -71,15 +71,27 @@ export function newPlan(input={},type='research') {
   if(input?.delivery?.format==='web_report') base.acceptance.independent_review=true;
   return normalizePlan(input,base);
 }
-export async function validatePlanAgents(db,plan) {
+export async function validatePlanAgents(db,plan,hostId=null) {
   if(plan.delivery.author_id!=null&&!await db.prepare("SELECT id FROM principals WHERE id=? AND kind='agent' AND active=1").bind(plan.delivery.author_id).first()) invalid('主要作者不存在或已停用');
+  if(hostId!=null) {
+    integer(hostId,1,Number.MAX_SAFE_INTEGER,'主持 Agent');
+    if(!await db.prepare("SELECT id FROM principals WHERE id=? AND kind='agent' AND active=1").bind(hostId).first()) invalid('主持 Agent 不存在或已停用');
+  }
 }
 export function planInsert(db,taskId,plan) {
   const target=taskId==null?'last_insert_rowid()':'?';
   return db.prepare(`INSERT INTO task_plans(task_id,goal,collaboration,acceptance_json,schedule_json,delivery_json,updated_at) VALUES(${target},?,?,?,?,?,?)`).bind(...(taskId==null?[]:[taskId]),plan.goal,plan.collaboration,JSON.stringify(plan.acceptance),JSON.stringify(plan.schedule),JSON.stringify(plan.delivery),new Date().toISOString());
 }
+export function workflowUpsert(db,taskId,hostId,plan) {
+  const target=taskId==null?'last_insert_rowid()':'?';
+  return db.prepare(`INSERT INTO task_workflows(task_id,host_id,acceptance,min_sources,created_at) VALUES(${target},?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET host_id=excluded.host_id,acceptance=excluded.acceptance,min_sources=excluded.min_sources`)
+    .bind(...(taskId==null?[]:[taskId]),hostId,plan.acceptance.criteria,plan.acceptance.min_sources,new Date().toISOString());
+}
 export async function readPlan(db,task,profile=null) {
   const row=await db.prepare('SELECT * FROM task_plans WHERE task_id=?').bind(task.id).first();
+  return planFromRow(task,profile,row);
+}
+export function planFromRow(task,profile,row) {
   if(row) return {goal:row.goal,collaboration:row.collaboration,acceptance:JSON.parse(row.acceptance_json),schedule:JSON.parse(row.schedule_json),delivery:JSON.parse(row.delivery_json),revision:row.revision,configured:true};
   const plan=defaultPlan(task.type);
   if(profile) {plan.collaboration='hosted';plan.acceptance.criteria=profile.acceptance;if(task.type!=='creative') plan.acceptance.min_sources=profile.min_sources;}
@@ -105,7 +117,8 @@ export function normalizeReport(value) {
   try {url=new URL(value.url);} catch {invalid('报告链接无效');}
   if(!['http:','https:'].includes(url.protocol)||url.username||url.password) invalid('报告须为不含凭据的 HTTP(S) 链接');
   if(url.href.length>2048) invalid('报告链接过长');
-  return {url:url.href,revision:string(value.revision,120,'报告发布版本',true),title:string(value.title||'网页报告',200,'报告标题',true),published_at:date(value.published_at||new Date().toISOString(),'发布时间')};
+  const localPath=value.local_path==null||value.local_path===''?null:string(value.local_path,500,'本地报告路径',true);
+  return {url:url.href,revision:string(value.revision,120,'报告发布版本',true),title:string(value.title||'网页报告',200,'报告标题',true),published_at:date(value.published_at||new Date().toISOString(),'发布时间'),...(localPath?{local_path:localPath}:{})};
 }
 // Each accepted period is a separate task, preserving its report/reviews. No Agent is awakened here.
 export function nextOccurrenceStatements(db,task,plan,at=Date.now()) {

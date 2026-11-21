@@ -1,9 +1,11 @@
 import { hashSecret, originAllowed, permit } from './auth.js';
 import { GUIDE_DISCOVERY } from './agent-guide.js';
-import { readPlan, normalizePlan, savePlan, scheduleState, normalizeReport } from './task-plan.js';
+import { readPlan, planFromRow, normalizePlan, savePlan, scheduleState, normalizeReport, validatePlanAgents, workflowUpsert } from './task-plan.js';
 import { readTaskActivity } from './task-activity.js';
-import { isActiveDebate, discussionContext, debateTurn, DEBATE_POLL_SECONDS } from './active-debate.js';
+import { isActiveDebate, discussionContext, debateTurn, DEBATE_POLL_SECONDS, validateSummaryReferences, validateDebateReferences } from './active-debate.js';
 import { storeUploadedFile } from './files.js';
+import { listPendingDirectivesForAgent } from './agent-directives.js';
+import { recordInboxFetch } from './agent-inbox.js';
 
 export class WorkError extends Error { constructor(message, status = 400) { super(message); this.status = status; } }
 export const fail = (message, status = 400) => { throw new WorkError(message, status); };
@@ -51,45 +53,50 @@ export async function sourceRef(db, taskId, ref) {
   if(row.agent) {const matches=await all(db,'SELECT id FROM principals WHERE name=?',row.agent);if(matches.length===1) authorId=matches[0].id;}
   return {kind:ref.kind,id:row.id,author_id:authorId};
 }
-export async function workflowContext(db, task, sharedPeople = null, {supplements = null, hasChallenges = null} = {}) {
-  if (!['done','closed'].includes(task.status) && hasChallenges !== false) await syncIssues(db,task.id);
+export async function workflowContext(db, task, sharedPeople = null, {supplements = null, hasChallenges = null, summaryAt = null, challenges = [], preloaded = null} = {}) {
+  const summary=summaryAt!==null, finished=['done','closed'].includes(task.status);
+  if (!summary && !finished && hasChallenges !== false) await syncIssues(db,task.id);
   const queries=[
     ['SELECT * FROM task_workflows WHERE task_id=?',task.id],
     ['SELECT * FROM work_issues WHERE task_id=? ORDER BY id',task.id],
-    ['SELECT * FROM work_subtasks WHERE task_id=? ORDER BY id',task.id],
-    ['SELECT * FROM work_outcomes WHERE task_id=? ORDER BY id DESC',task.id],
+    [summary?'SELECT state FROM work_subtasks WHERE task_id=?':'SELECT * FROM work_subtasks WHERE task_id=? ORDER BY id',task.id],
+    [`SELECT * FROM work_outcomes WHERE task_id=? ORDER BY id DESC${summary?' LIMIT 1':''}`,task.id],
     ...(!sharedPeople ? [[`SELECT p.id,p.name AS actor,COALESCE(l.display_name,p.name) AS name,p.active FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id`]] : []),
-    ['SELECT * FROM work_subtask_events WHERE task_id=? ORDER BY id',task.id],
+    ...(!summary ? [['SELECT * FROM work_subtask_events WHERE task_id=? ORDER BY id',task.id]] : []),
     ...(supplements === null ? [['SELECT DISTINCT agent FROM supplements WHERE task_id=?',task.id]] : []),
     [`SELECT r.*,COALESCE(l.display_name,p.name) AS reviewer FROM work_reviews r JOIN principals p ON p.id=r.reviewer_id LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE r.task_id=? ORDER BY r.id DESC`,task.id],
-    ['SELECT * FROM work_deliveries WHERE task_id=?',task.id],
-    ['SELECT * FROM task_recurrences WHERE previous_task_id=? OR next_task_id=?',task.id,task.id],
+    [summary?'SELECT * FROM work_deliveries WHERE outcome_id=(SELECT id FROM work_outcomes WHERE task_id=? ORDER BY id DESC LIMIT 1)':'SELECT * FROM work_deliveries WHERE task_id=?',task.id],
+    ...(!summary ? [['SELECT * FROM task_recurrences WHERE previous_task_id=? OR next_task_id=?',task.id,task.id]] : []),
   ];
-  const [profiles,issues,subtasks,outcomes,...remaining]=await readBatch(db,queries);
+  const [profiles,issues,subtasks,outcomes,...remaining]=preloaded?.rows??await readBatch(db,queries);
   const people=sharedPeople||remaining.shift();
-  const subtaskEvents=remaining.shift();
+  const subtaskEvents=summary?[]:remaining.shift();
   const supplementRows=supplements===null?remaining.shift():supplements;
   const supplementNames=new Set(supplementRows.map(row=>row.agent));
   const contributors=people.filter(person=>supplementNames.has(person.actor));
-  const [reviews,deliveries,periods]=remaining;
+  const [reviews,deliveries,periods=[]]=remaining;
   const profile=profiles[0]||null;
-  const plan=await readPlan(db,task,profile),scheduled=scheduleState(plan);
-  const discussion=isActiveDebate(plan)?await discussionContext(db,task,plan,people):null;
+  const at=summaryAt??Date.now();
+  const plan=preloaded?planFromRow(task,profile,preloaded.planRow):await readPlan(db,task,profile),scheduled=scheduleState(plan,at);
+  const discussion=isActiveDebate(plan)?await discussionContext(db,task,plan,people,at,summary,preloaded?.discussionMessages??null):null;
   const names=new Map(people.map(p=>[p.id,p.name]));
   for(const i of issues) { i.author=names.get(i.author_id)||'历史记录';i.responder=names.get(i.responder_id)||'';i.resolver=names.get(i.resolver_id)||''; }
-  for(const s of subtasks) {s.history=subtaskEvents.filter(e=>e.subtask_id===s.id).map(e=>({...e,actor:names.get(e.actor_id)||'历史账号',detail:JSON.parse(e.detail||'{}')}));s.assignee=names.get(s.assignee_id)||'未知账号';s.reviewer=names.get(s.reviewer_id)||'';s.assignee_active=!!people.find(p=>p.id===s.assignee_id)?.active;s.ack_overdue=s.state==='assigned'&&Date.now()-Date.parse(s.assigned_at)>=7200000;s.overdue=['accepted','waiting'].includes(s.state)&&Date.parse(s.resume_at||s.due_at)<=Date.now();}
+  if(!summary) for(const s of subtasks) {s.history=subtaskEvents.filter(e=>e.subtask_id===s.id).map(e=>({...e,actor:names.get(e.actor_id)||'历史账号',detail:JSON.parse(e.detail||'{}')}));s.assignee=names.get(s.assignee_id)||'未知账号';s.reviewer=names.get(s.reviewer_id)||'';s.assignee_active=!!people.find(p=>p.id===s.assignee_id)?.active;s.ack_overdue=s.state==='assigned'&&at-Date.parse(s.assigned_at)>=7200000;s.overdue=['accepted','waiting'].includes(s.state)&&Date.parse(s.resume_at||s.due_at)<=at;}
   for(const o of outcomes) {o.author=names.get(o.author_id)||'未知账号';o.source_refs=JSON.parse(o.source_refs);o.report=JSON.parse(deliveries.find(d=>d.outcome_id===o.id)?.report_json||'null');}
   const outcome=outcomes[0]||null;
   if(discussion) discussion.has_summary=!!outcome&&Date.parse(outcome.created_at)>=Date.parse(discussion.end_at);
   // Preserve pre-upgrade review fingerprints until an existing task explicitly adopts a plan.
   const fingerprint=await hashSecret(JSON.stringify({summary:task.result_summary,links:task.result_links,claimant:task.claimed_by,profile:profile?{host_id:profile.host_id,acceptance:profile.acceptance,min_sources:profile.min_sources}:null,...(plan.configured?{plan}:{}),...(discussion?{discussion:discussion.last_message_id}:{}),outcome:outcome?.id||null,issues:issues.map(i=>({id:i.id,text:i.text,response:i.response,evidence:i.evidence}))}));
   const authors=new Set([profile?.host_id,plan.delivery.author_id,outcome?.author_id,...contributors.map(p=>p.id),...(outcome?.source_refs||[]).map(s=>s.author_id),...people.filter(p=>p.actor===task.claimed_by).map(p=>p.id)].filter(Boolean));
-  const independent=reviews.filter(r=>r.fingerprint===fingerprint&&!authors.has(r.reviewer_id));
-  const waiting=!discussion&&!!profile?.resume_at&&Date.parse(profile.resume_at)>Date.now();
-  return {enabled:!!profile||plan.configured,plan,scheduled,...(discussion?{discussion}:{}),waiting:waiting||!scheduled.ready,resume_at:waiting?profile.resume_at:scheduled.resume_at,wait_reason:waiting?profile.wait_reason:scheduled.reason,host_id:profile?.host_id||null,host:names.get(profile?.host_id)||'',report_author_id:plan.delivery.author_id,report_author:names.get(plan.delivery.author_id)||'',acceptance:plan.acceptance.criteria,min_sources:plan.acceptance.min_sources,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length,previous_task_id:periods.find(p=>p.next_task_id===task.id)?.previous_task_id||null,next_task_id:periods.find(p=>p.previous_task_id===task.id)?.next_task_id||null};
+  // A legacy challenge blocks acceptance as soon as it is saved. Reading a
+  // summary leaves its conversion to a work issue to the full task flow.
+  const unmatched=summary&&!finished?challenges.filter(c=>!issues.some(i=>i.challenge_id===c.id)).length:0;
+  const independent=unmatched?[]:reviews.filter(r=>r.fingerprint===fingerprint&&!authors.has(r.reviewer_id));
+  const waiting=!discussion&&!!profile?.resume_at&&Date.parse(profile.resume_at)>at;
+  return {enabled:!!profile||plan.configured,plan,scheduled,...(discussion?{discussion}:{}),waiting:waiting||!scheduled.ready,resume_at:waiting?profile.resume_at:scheduled.resume_at,wait_reason:waiting?profile.wait_reason:scheduled.reason,host_id:profile?.host_id||null,host:names.get(profile?.host_id)||'',report_author_id:plan.delivery.author_id,report_author:names.get(plan.delivery.author_id)||'',acceptance:plan.acceptance.criteria,min_sources:plan.acceptance.min_sources,fingerprint,author_ids:[...authors],issues,subtasks,outcomes,reviews,current_reviews:independent,blocking:unmatched+issues.filter(i=>i.severity==='blocking'&&i.state!=='resolved').length,previous_task_id:periods.find(p=>p.next_task_id===task.id)?.previous_task_id||null,next_task_id:periods.find(p=>p.previous_task_id===task.id)?.next_task_id||null};
 }
-export async function decorateCollaboration(db, task, context, readiness, collaboration, principal=null, people=null) {
-  const work=await workflowContext(db,task,people,{supplements:context.supplements,hasChallenges:context.challenges.length>0});
+export async function decorateCollaboration(db, task, context, readiness, collaboration, principal=null, people=null, summaryAt=null, preloaded=null) {
+  const work=await workflowContext(db,task,people,{supplements:context.supplements,hasChallenges:context.challenges.length>0,summaryAt,challenges:context.challenges,preloaded});
   const check=(key,label,met,detail)=>({key,label,met,detail});
   if(work.discussion) {
     const d=work.discussion,summary=d.has_summary?work.outcomes[0]?.summary||'':'';
@@ -155,6 +162,19 @@ async function inbox(db,p) {
   }
   const challengeIds=new Set(challenges.map(row=>row.task_id));
   const items=[], waiting=[];
+  const pendingDirectives = agent(p) ? await listPendingDirectivesForAgent(db, p.id) : [];
+  for (const d of pendingDirectives) {
+    items.push({
+      kind: 'directive',
+      directive_id: d.id,
+      author: d.author_name || '管理员',
+      content: d.content,
+      created_at: d.created_at,
+      action: 'complete_directive',
+      complete_url: `/api/agent/directives/${d.id}/complete`,
+      reason: `管理员留言指示（完成后请调用 POST /api/agent/directives/${d.id}/complete 回馈结果，系统将自动标记达成并存档）`,
+    });
+  }
   for(const t of tasks) {
     const w=await workflowContext(db,t,people,{supplements:supplementRows.get(t.id)||[],hasChallenges:challengeIds.has(t.id)});
     const missingReport=w.plan.delivery.format==='web_report'&&!w.outcomes[0]?.report;
@@ -170,7 +190,7 @@ async function inbox(db,p) {
       if(admin(p)||w.host_id===p.id||w.report_author_id===p.id||t.claimed_by===p.name||(!w.host_id&&agent(p))) waiting.push({...base,kind:'schedule',resume_at:w.resume_at,reason:w.wait_reason});
       continue;
     }
-    if(w.host_id===p.id||admin(p)) (w.waiting?waiting:items).push({...base,kind:'host',state:w.waiting?'waiting':undefined,resume_at:w.resume_at,reason:w.waiting?w.wait_reason:w.blocking?`${w.blocking} 项重要问题待处理`:'整理成果、协调分工'});
+    if(w.host_id===p.id||admin(p)) (w.waiting?waiting:items).push({...base,kind:'host',state:w.waiting?'waiting':undefined,resume_at:w.resume_at,reason:w.waiting?w.wait_reason:w.blocking?`${w.blocking} 项重要问题待处理`:'整理独立完整的最终成果（通俗精炼、少带 #编号，改动写入 changes）、协调分工'});
     for(const s of w.subtasks) {
       if(s.assignee_id!==p.id||['done','declined','submitted'].includes(s.state)) continue;
       const item={...base,kind:'subtask',subtask_id:s.id,title:s.title,state:s.state,due_at:s.due_at,resume_at:s.resume_at};
@@ -178,29 +198,36 @@ async function inbox(db,p) {
     }
     for(const i of w.issues.filter(i=>i.state!=='resolved')) {
       const responsible=w.report_author_id===p.id||w.outcomes[0]?.author_id===p.id;
-      if(w.host_id===p.id||i.author_id===p.id||admin(p)||((responsible||t.claimed_by===p.name)&&i.state==='open')) items.push({...base,kind:'issue',issue_id:i.id,reason:i.text,state:i.state});
+      const reportHint=w.plan.delivery.format==='web_report'&&(responsible||t.claimed_by===p.name)&&i.state==='open'
+        ? {hint:'修订网页报告须先更新本地 HTML 报告文件，再从本地文件上传 R2 登记新版 /outcomes（summary 须是独立完整修订版，不写修改流水账、尽量不带 #编号；具体改动放 changes），之后再回应此问题'}
+        : {};
+      if(w.host_id===p.id||i.author_id===p.id||admin(p)||((responsible||t.claimed_by===p.name)&&i.state==='open')) items.push({...base,kind:'issue',issue_id:i.id,revision:i.revision,fingerprint:w.fingerprint,reason:i.text,state:i.state,...reportHint});
     }
     if(agent(p)&&w.report_author_id===p.id) {
-      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',reason:`先制作网页报告（可直接通过 POST /api/files 上传 HTML 档案，或在 POST /api/tasks/${t.id}/outcomes 的 report.html 中直接提交 HTML 内容），再提交 report.revision 与当前 workflow.fingerprint`});
+      if(!w.outcomes[0]?.report) items.push({...base,kind:'report',fingerprint:w.fingerprint,reason:`先在本地更新并保存完整 HTML 报告文件，再从本地文件上传 R2（优先 PUT /api/files/<文件名> 或 POST /api/files，或读取本地文件经 POST /api/tasks/${t.id}/outcomes 的 report.html 提交），同时登记 report.revision、report.local_path（可选）与当前 workflow.fingerprint；不要跳过本地文件直接改 API 请求`});
       else if(!w.issues.some(i=>i.state==='open')) waiting.push({...base,kind:'report_review',resume_at:null,reason:w.blocking?'报告问题已回应，等待他人确认':w.plan.acceptance.independent_review&&!w.current_reviews.length?'报告已登记，等待独立核查':'报告已交付，等待用户确认'});
     }
-    if(agent(p)&&w.enabled&&!missingReport&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示':'请独立核查当前成果'});
+    if(agent(p)&&w.enabled&&!missingReport&&w.plan.acceptance.independent_review&&!w.author_ids.includes(p.id)&&!w.current_reviews.length&&(w.outcomes.length||t.result_summary)) items.push({...base,kind:'review',fingerprint:w.fingerprint,report:w.outcomes[0]?.report||null,reason:w.outcomes[0]?.report?'打开当前报告，核查内容、来源及页面展示；若指出问题请用 > 引用块摘录原文并写明具体偏差与修正建议':'请独立核查当前成果；若指出问题请用 > 引用块摘录原文并写明具体偏差与修正建议'});
     if(agent(p)) for(const s of w.subtasks.filter(s=>s.state==='submitted'&&s.assignee_id!==p.id)) items.push({...base,kind:'subtask_review',subtask_id:s.id,title:s.title});
   }
-  const priority=item=>item.kind!=='active_debate'?0:item.pending_reply_ids?.length?1:item.action==='summarize'?2:item.action==='enter'?3:4;
+  const priority=item=>item.kind==='directive'?-1:item.kind!=='active_debate'?0:item.pending_reply_ids?.length?1:item.action==='summarize'?2:item.action==='recap'?3:item.action==='enter'?4:5;
   items.sort((a,b)=>priority(a)-priority(b));
-  return {items,waiting,poll_after_seconds:[...items,...waiting].some(i=>i.kind==='active_debate')?DEBATE_POLL_SECONDS:900,agent_guide:GUIDE_DISCOVERY};
+  return {items,waiting,...(agent(p)?{directives:pendingDirectives}:{}),poll_after_seconds:[...items,...waiting].some(i=>i.kind==='active_debate')?DEBATE_POLL_SECONDS:900,agent_guide:GUIDE_DISCOVERY};
 }
 
 export async function collaborationRoute(request, env, principal, path) {
-  const match=path.match(/^\/api\/tasks\/(\d+)\/(activity|plan|trigger|workflow|outcomes|reviews|issues|subtasks|wait|close)(?:\/(\d+)\/(respond|resolve|dispute|accept|decline|wait|submit|check|reassign|remind))?$/);
+  const match=path.match(/^\/api\/tasks\/(\d+)\/(activity|plan|trigger|workflow|outcomes|reviews|issues|subtasks|wait|close|recap-request)(?:\/(\d+)\/(respond|resolve|dispute|accept|decline|wait|submit|check|reassign|remind))?$/);
   if(!match&&!['/api/inbox','/api/participants'].includes(path)) return null;
   try {
     if(!principal?.id) fail('请使用个人账号或独立 Agent 令牌',401);
     if(!originAllowed(request,env,principal)) fail('来源不符',403);
     if(!['GET','POST'].includes(request.method)) fail('不支持此方法',405);
     const db=env.DB,p=principal;
-    if(path==='/api/inbox'&&request.method==='GET') return answer(await inbox(db,p));
+    if(path==='/api/inbox'&&request.method==='GET') {
+      const data = await inbox(db,p);
+      await recordInboxFetch(db,p,(data.directives || []).map(d=>d.id));
+      return answer(data);
+    }
     if(path==='/api/participants'&&request.method==='GET') return answer({agents:await all(db,`SELECT p.id,p.username,COALESCE(l.display_name,p.name) AS name FROM principals p LEFT JOIN principal_labels l ON l.principal_id=p.id WHERE p.kind='agent' AND p.active=1 ORDER BY p.id`)});
     if(!match) fail('不支持此方法',405);
     const taskId=Number(match[1]),kind=match[2],recordId=match[3]?Number(match[3]):null,action=match[4];
@@ -218,10 +245,18 @@ export async function collaborationRoute(request, env, principal, path) {
       if(['done','closed'].includes(task.status)) fail('已结束的任务不能更改安排',409);
       if(b.revision!==w.plan.revision) fail('任务安排已更新，请刷新后再保存',409);
       const plan=normalizePlan(b,w.plan);
+      const rawHostId=Object.hasOwn(b,'host_id')?b.host_id:undefined;
+      const hostId=rawHostId===undefined||rawHostId===null||rawHostId===''?null:rawHostId;
+      if(hostId!=null&&plan.collaboration!=='hosted') fail('只有主持分工模式可指定主持人');
+      await validatePlanAgents(db,plan,hostId);
       const saved=await savePlan(db,task,plan,b.revision);
+      if(hostId!=null) {
+        await workflowUpsert(db,taskId,hostId,saved).run();
+        if(hostId!==w.host_id) await audit(db,taskId,p,'host',taskId,JSON.stringify({host_id:hostId,acceptance:saved.acceptance.criteria,min_sources:saved.acceptance.min_sources}));
+      }
       if(isActiveDebate(saved)&&task.status==='review'&&Date.parse(saved.schedule.end_at)>Date.now()) await run(db,"UPDATE tasks SET status='in_progress',updated_at=? WHERE id=? AND status='review'",now(),taskId);
       await audit(db,taskId,p,'plan',taskId,JSON.stringify(saved));
-      return answer({plan:saved});
+      return answer({plan:saved,...(hostId!=null?{host_id:hostId}:{})});
     }
     if(kind==='close') {
       if(!admin(p)) fail('只有管理员可关闭激辩',403);
@@ -232,6 +267,16 @@ export async function collaborationRoute(request, env, principal, path) {
         db.prepare("INSERT INTO work_activity(task_id,actor_id,kind,record_id,detail,created_at) SELECT ?,?,'discussion_close',?,?,? WHERE changes()=1").bind(taskId,p.id,taskId,JSON.stringify({reason}),now()),
       ]);
       return answer({status:'closed'});
+    }
+    if(kind==='recap-request') {
+      if(!admin(p)) fail('只有管理员可请求更新阶段总结',403);
+      if(!w.discussion||w.discussion.phase!=='active') fail('仅进行中的激辩可请求阶段总结',409);
+      if(w.discussion.messages_since_recap<1) fail('自上次阶段总结后尚无新讨论',409);
+      if(w.discussion.recap_requested_at) return answer({requested:true,already_pending:true,recap_requested_at:w.discussion.recap_requested_at});
+      const stamp=now(),afterRecapId=w.discussion.latest_recap_id||0;
+      await run(db,'INSERT INTO work_activity (task_id,actor_id,kind,record_id,detail,created_at) VALUES (?,?,?,?,?,?)',
+        taskId,p.id,'discussion_recap_request',afterRecapId,JSON.stringify({after_recap_id:afterRecapId,messages_since_recap:w.discussion.messages_since_recap}),stamp);
+      return answer({requested:true,already_pending:false,recap_requested_at:stamp},201);
     }
     if(kind==='workflow') {
       if(['done','closed'].includes(task.status)) fail('已结束的任务不能更改主持设置',409);
@@ -272,6 +317,10 @@ export async function collaborationRoute(request, env, principal, path) {
       if(!w.enabled||!permitted) fail('由管理员、主持人或指定的主要作者提交成果',403);
       if((b.report!=null||b.fingerprint!=null)&&b.fingerprint!==w.fingerprint) fail('成果已更新，请重读后再发布当前版本',409);
       const summary=text(b.summary),urls=links(b.links),changes=text(b.changes,2000),refs=b.source_refs??[];
+      if(agent(p)) {
+        try { validateSummaryReferences(summary,w.discussion?'激辩截止总结':'成果总结'); }
+        catch(e) { fail(e.message,e.status||400); }
+      }
       if(!Array.isArray(refs)||refs.length>50) fail('来源引用最多 50 条');
       const sources=[];for(const ref of refs) sources.push(await sourceRef(db,taskId,ref));
       let rawReport=b.report;
@@ -318,6 +367,10 @@ export async function collaborationRoute(request, env, principal, path) {
       if(!recordId) {
         const severity=b.severity||'blocking';if(!['blocking','suggestion'].includes(severity)) fail('无效问题级别');
         const content=text(b.text,6000);
+        if(agent(p)) {
+          try { validateDebateReferences(content,'核查问题'); }
+          catch(e) { fail(e.message,e.status||400); }
+        }
         if(w.outcomes[0]?.report&&b.fingerprint!==w.fingerprint) fail('报告版本已更新，请重读后再提出问题',409);
         const r=await run(db,'INSERT INTO work_issues(task_id,author_id,outcome_id,opened_fingerprint,text,severity,created_at) VALUES(?,?,?,?,?,?,?)',taskId,p.id,w.outcomes[0]?.id||null,w.fingerprint,content,severity,now());
         if(severity==='blocking') await run(db,"UPDATE tasks SET status='in_progress',updated_at=? WHERE id=?",now(),taskId);

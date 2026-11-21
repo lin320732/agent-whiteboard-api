@@ -87,7 +87,7 @@ test('concurrent cold logins probe readiness independently without sharing reque
   const {env,DB,request}=setup();
   const {password}=await owner(request);
   let probes=0;
-  env.DB={...DB,exec(){throw Error('Cold login must not migrate');},prepare(sql){if(sql.includes('sqlite_master')) probes++;return DB.prepare(sql);}};
+  env.DB={...DB,exec(){throw Error('Cold login must not migrate');},prepare(sql){if(sql.includes('table_list')) probes++;return DB.prepare(sql);}};
   const logins=await Promise.all([1,2,3].map(()=>request('POST','/api/auth/login',{username:'owner',password})));
   assert.deepEqual(logins.map(login=>login.status),[200,200,200]);
   assert.equal(probes,3);
@@ -97,7 +97,7 @@ test('failed cold readiness reads fail closed and can recover on the next reques
   const {env,DB,request}=setup();
   await owner(request);
   let probes=0;
-  env.DB={...DB,exec(){throw Error('Migrated schema must not be rewritten');},prepare(sql){if(sql.includes('sqlite_master')&&++probes===1) throw Error('Temporary D1 read failure');return DB.prepare(sql);}};
+  env.DB={...DB,exec(){throw Error('Migrated schema must not be rewritten');},prepare(sql){if(sql.includes('table_list')&&++probes===1) throw Error('Temporary D1 read failure');return DB.prepare(sql);}};
   assert.equal((await request('GET','/api/health')).status,503);
   assert.equal((await request('GET','/api/health')).status,200);
   const completedProbes=probes;

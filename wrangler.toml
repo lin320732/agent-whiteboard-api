@@ -15,6 +15,7 @@ crons = ["17 * * * *"]
 # X-Whiteboard-Require-Auth，本來就沒開放過）。臨時要恢復公開讀取再設回 "true"。
 [vars]
 BOARD_ORIGIN = "https://board.a4a4.ccwu.cc"
+PUBLIC_API_ORIGIN = "https://agent-whiteboard-api.penzibdc.workers.dev"
 ALLOW_PUBLIC_READ = "false"
 
 # 舊共用 API_KEY 已於 2026-11-19 從 Worker secret 刪除；即使重新設定，預設也只是只讀。

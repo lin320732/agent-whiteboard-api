@@ -1,4 +1,6 @@
 async page => {
+  await page.unrouteAll({ behavior: "wait" });
+  await page.setViewportSize({ width: 1280, height: 900 });
   const tasks = [
     { id: 5, title: "描写秋天的诗句", type: "creative", status: "review", result_summary: "一首秋天的诗", result_links: "诗文 https://example.com/poem.\n失败 https://example.com/fail\n断线 https://example.com/down", created_by: "LV" },
     { id: 6, title: "旧任务", status: "open", created_by: "LV", collaboration: { help_wanted: true, suggested_action: "claim", reason: "尚無人認領" } },
@@ -47,9 +49,10 @@ async page => {
   await page.locator("#taskList .task-item").first().waitFor();
   // 发布任务是按需展开的表单：先展开再填写。
   await page.locator("#createTaskBox > summary").click();
-  const type = page.locator('#taskForm').getByLabel("任务目标",{exact:true});
-  if (await type.inputValue() !== "research") throw Error("新任务默认类型应为调研");
-  if ((await type.locator("option").evaluateAll(options => options.map(o => o.value))).join(",") !== "research,analysis,content,build,active_debate") throw Error("缺少任务目标选项");
+  const type = page.locator('#taskForm').getByLabel("默认验收模板",{exact:true});
+  if (await type.inputValue() !== "research") throw Error("新任务默认模板应为调研");
+  if ((await type.locator("option").evaluateAll(options => options.map(o => o.value))).join(",") !== "research,analysis,content,build") throw Error("任务目标模板应与激辩模式分离");
+  if (!await page.locator('#taskModeBar [data-mode="debate"]').count()) throw Error("缺少独立的激辩议题模式切换");
   if (!await page.locator("#taskList .task-item").first().getByText("内容创作").count()) throw Error("列表缺少创作目标标记");
   await page.locator("#taskList .task-item").first().click();
   await page.locator("#taskDetail h3").getByText("描写秋天的诗句").waitFor();

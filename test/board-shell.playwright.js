@@ -1,4 +1,6 @@
 async page => {
+  await page.unrouteAll({ behavior: "wait" });
+  await page.setViewportSize({ width: 1280, height: 900 });
   // 主流程：默认聚焦任务、成果入口、文字/报告成果、引用跳转、次要视图、手机宽度与键盘。
   const json = value => ({ status: 200, contentType: "application/json", body: JSON.stringify(value) });
   const report = { url: "https://example.com/report", title: "秋季市场报告", revision: "v2", published_at: "2026-11-17T09:00:00Z" };
@@ -15,11 +17,18 @@ async page => {
     { id: 11, agent: "Agent A", role: "agent", stance: "支持", content: "结论与官方数据一致", created_at: "2026-11-15T10:00:00Z" },
     { id: 12, agent: "Agent B", role: "agent", stance: "反驳", reply_to: 11, content: "库存数据的时间窗口偏短", created_at: "2026-11-15T10:02:00Z" },
   ];
+  const files = [
+    { id: "f_1234567890abcdef12345678", path: "/api/files/f_1234567890abcdef12345678/market-v2.html", url: "https://example.com/api/files/f_1234567890abcdef12345678/market-v2.html", filename: "market-v2.html", title: "秋季市场报告 v2", content_type: "text/html; charset=utf-8", size: 24500, uploader_id: 3, uploader: "Writer", task_id: 9, task_title: "市场报告：秋季趋势", scope: "report", created_at: "2026-11-17T09:10:00Z" },
+    { id: "f_abcdef1234567890abcdef12", path: "/api/files/f_abcdef1234567890abcdef12/chart.png", url: "https://example.com/api/files/f_abcdef1234567890abcdef12/chart.png", filename: "chart.png", title: "趋势图", content_type: "image/png", size: 102400, uploader_id: 3, uploader: "Writer", task_id: null, task_title: null, scope: "media", created_at: "2026-11-17T09:12:00Z" },
+  ];
+  let deletedFileId = null;
   await page.route("**/api/**", async route => {
     const request = route.request();
     const path = request.url().replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+    if (path === "/api/files/f_1234567890abcdef12345678/market-v2.html") return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: "<!doctype html><h1>沙盒报告预览</h1>" });
+    if (path === "/api/files/f_abcdef1234567890abcdef12/chart.png") return route.fulfill({ status: 200, contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="#0d7a6b"/></svg>' });
     if (path === "/api/auth/me") return route.fulfill(json({ user: { id: 1, name: "管理员", role: "admin" } }));
-    if (path === "/api/channels") return route.fulfill(json({ channels: [{ id: 1, name: "市场观察" }, { id: 2, name: "工具" }] }));
+    if (path === "/api/channels") return route.fulfill(json({ channels: [{ id: 1, name: "白板反馈", topic: "记录白板问题与建议" }, { id: 2, name: "AI 资讯", topic: "自由留言" }] }));
     if (path === "/api/tasks") return route.fulfill(json({ tasks }));
     if (path === "/api/tasks/9") return route.fulfill(json({
       task: tasks[0], plan, workflow, debate,
@@ -30,17 +39,19 @@ async page => {
     if (path === "/api/tasks/8") return route.fulfill(json({ task: tasks[1], debate: [], challenges: [], supplements: [], verify_readiness: { ready: true, checks: [] } }));
     if (path === "/api/tasks/6") return route.fulfill(json({ task: tasks[3], debate: [], challenges: [], supplements: [], verify_readiness: { ready: true, checks: [] } }));
     if (path === "/api/tasks/7") return route.fulfill(json({ task: tasks[2], collaboration: tasks[2].collaboration, debate: [], challenges: [], supplements: [], verify_readiness: { ready: false, checks: [] } }));
-    if (path === "/api/messages") return route.fulfill(json({ messages: [{ author: "LV", role: "human", text: "报告已更新", created_at: "2026-11-17T08:00:00Z" }] }));
-    if (path === "/api/leaderboard") return route.fulfill(json({ leaderboard: [{ agent: "Agent A", points: 12 }] }));
+    if (path === "/api/messages") return route.fulfill(json({ messages: [{ id: 1, channel_id: 1, author: "LV", role: "human", text: "报告已更新", created_at: "2026-11-17T08:00:00Z" }] }));
+    if (path === "/api/files" && request.method() === "GET") return route.fulfill(json({ files }));
+    if (path.startsWith("/api/files/") && request.method() === "DELETE") {
+      deletedFileId = path.split("/").pop();
+      const idx = files.findIndex(f => f.id === deletedFileId);
+      if (idx >= 0) files.splice(idx, 1);
+      return route.fulfill(json({ deleted: deletedFileId }));
+    }
     if (path === "/api/participants") return route.fulfill(json({ agents: [{ id: 2, name: "Host" }, { id: 3, name: "Writer" }] }));
     if (path === "/api/digest") return route.fulfill(json({ highlights: [{ task_id: 9, title: "成果更新", text: "Writer 发布了 v2 报告" }], decisions: [{ task_id: 9, title: tasks[0].title, status: "review" }] }));
     if (path === "/api/inbox") return route.fulfill(json({ items: [], waiting: [] }));
-    if (path === "/api/topics") return route.fulfill(json({ themes: [{ id: "tech", name: "科技" }], topics: [{ id: 1, theme: "tech", author: "Host", title: "核对方式", content: "讨论工具", replies: 2 }] }));
-    if (path === "/api/topics/1") return route.fulfill(json({ topic: { id: 1, title: "核对方式", author: "Host", content: "讨论工具" }, replies: [{ id: 1, author: "Worker", content: "可以先做小样", reply_to: null }, { id: 2, author: "Checker", content: "同意，先做小样再核对", reply_to: 1 }, { id: 3, author: "Host", content: "引用已经不存在", reply_to: 99 }], proposals: [] }));
     if (path === "/api/agent-guide") return route.fulfill(json({ ok: true, version: "v1", instructions: "先处理已接单工作。", markdown: "# 指南", bootstrap: "每轮先读取 /api/agent-guide" }));
     if (path === "/api/admin/users" || path === "/api/admin/agents") return route.fulfill(json({ accounts: [] }));
-    if (path === "/api/link-preview") return route.fulfill(json({ ok: true, domain: "example.com", title: "示例来源" }));
-    if (path.endsWith("/contributions")) return route.fulfill(json({ contributions: [] }));
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: `unmocked ${path}` }) });
   });
 
@@ -50,7 +61,7 @@ async page => {
   // --- 默认工作台，任务与成果分别阅读 ---
   const nav = page.locator(".primary-nav");
   if (!await page.locator("#viewHome").isVisible() || await page.locator("#viewTasks").isVisible()) throw Error("默认没有进入工作台");
-  if (await nav.getByRole("tab").count() !== 4) throw Error("主导航应只有四个一级入口");
+  if (await nav.getByRole("tab").count() !== 5) throw Error("主导航应包含五个一级入口（工作台/任务/成果/档案/讨论区）");
   if (await page.locator('#navHome').getAttribute("aria-selected") !== "true") throw Error("默认选中项不是工作台");
   if (await nav.getByRole("tab", { name: "成果" }).getAttribute("aria-selected") !== "false") throw Error("默认同时选中了成果");
   if (await page.locator("#createTaskBox").evaluate(node => node.open) || await page.locator("#taskForm").isVisible()) throw Error("发布任务表单默认不应展开");
@@ -82,6 +93,7 @@ async page => {
   if (await page.locator("#debate-11").count() !== 1) throw Error("不同记录类型的相同 ID 被错误合并");
   if (await page.locator('#taskDetail [data-kind="challenge"][data-debate-id]').count()) throw Error("质疑记录冒用了辩论 ID");
   await quote.click();
+  await page.getByRole('dialog', { name: '引用内容 · 发言 #11' }).getByRole('button', { name: '定位到原楼层 #11 →' }).click();
   await page.waitForFunction(() => document.getElementById("debate-11")?.classList.contains("flash"));
   await page.waitForFunction(() => !document.getElementById("debate-11")?.classList.contains("flash"), null, { timeout: 4000 });
   await page.locator("#debate-11").getByRole("button", { name: "回复 Agent A" }).click();
@@ -119,24 +131,43 @@ async page => {
   if (!await page.locator("#outcomeDetail .outcome-empty").count()) throw Error("没有成果时缺少空状态");
   if (await page.locator("#outcomeDetail .outcome-summary").count() || await page.locator("#outcomeDetail .published-report").count()) throw Error("空成果被捏造了总结或报告");
 
-  // --- 交流与按需打开的工具 ---
-  await nav.getByRole("tab", { name: "交流" }).click();
-  await page.locator("#topicList button").first().click();
-  await page.locator("#topicDetail h3").waitFor();
-  const topicQuote = page.locator("#topic-reply-2 .reply-reference");
-  if (await topicQuote.getAttribute("href") !== "#topic-reply-1") throw Error("主题回复没有引用卡");
-  if (!await page.locator("#topic-reply-3 .reply-reference.is-missing").count()) throw Error("坏引用没有降级提示");
-  await topicQuote.click();
-  await page.waitForFunction(() => document.getElementById("topic-reply-1")?.classList.contains("flash"));
-  await page.locator("#topic-reply-1").getByRole("button", { name: "回复 Worker" }).click();
-  if (await page.locator('.topic-reply-form select[name="reply_to"]').inputValue() !== "1") throw Error("主题回复按钮没有带入引用");
-  if (!await page.locator("#messages .entry").count()) throw Error("频道讨论没有内容");
+  // --- 顶级 R2 档案中心：画廊、按任务分组、页内预览、筛选与删除 ---
+  await nav.getByRole("tab", { name: "档案" }).click();
+  if (!await page.locator("#viewFiles").isVisible()) throw Error("档案导航没有切换视图");
+  await page.locator("#filesList .file-gallery-card").first().waitFor();
+  if (await page.locator("#filesList .file-gallery-card").count() !== 2) throw Error("R2 档案画廊未显示全部文件");
+  if (await page.locator("#filesStats .file-stat-card").count() !== 4) throw Error("R2 档案概况统计条缺失");
+  // 点击 HTML 报告页内预览
+  await page.locator("#filesList .file-gallery-card").first().getByRole("button", { name: "预览", exact: true }).click();
+  await page.locator("#filePreviewModal iframe.preview-iframe").waitFor();
+  await page.locator("#filePreviewModal").getByRole("button", { name: "关闭" }).click();
+  if (await page.locator("#filePreviewModal").isVisible()) throw Error("预览弹层未关闭");
+  // 切换「按任务分组」视图
+  await page.locator('[data-files-view="grouped"]').click();
+  await page.locator("#filesList .file-group").first().waitFor();
+  if (!await page.locator("#filesList .file-group").getByText("市场报告：秋季趋势", { exact: false }).count()) throw Error("按任务分组未显示关联任务标题");
+  await page.locator('[data-files-view="list"]').click();
+  await page.locator("#filesList .file-card").first().waitFor();
+  await page.locator("#filesScopeChips").getByRole("button", { name: "媒体图表" }).click();
+  if (await page.locator("#filesList .file-card").count() !== 1) throw Error("R2 档案分类筛选无效");
+  await page.locator("#filesList .file-card").first().getByRole("button", { name: "删除" }).click();
+  await page.locator("#filesList .file-card").first().getByRole("button", { name: "确认删除" }).click();
+  await page.waitForFunction(() => document.querySelectorAll("#filesList .file-card").length === 0);
+  if (deletedFileId !== "f_abcdef1234567890abcdef12") throw Error("R2 档案删除未调用接口");
+
+  // --- 讨论区（精简频道留言板）与管理工具（无协作积分） ---
+  await nav.getByRole("tab", { name: "讨论区" }).click();
+  await page.locator('#channelList .channel-sidebar-item').nth(1).waitFor();
+  await page.locator('#messages .entry').first().waitFor();
+  if (await page.locator("#topicList").count()) throw Error("主题交流未下线");
+  if (!await page.locator("#channelList .channel-sidebar-item").count()) throw Error("讨论区缺少频道列表");
+  if (!await page.locator("#messages .entry").count()) throw Error("频道留言没有内容");
   await page.locator('#workspaceMenu > summary').click();
+  if (await page.locator('[data-settings="ranking"]').count()) throw Error("协作积分入口未移除");
   await page.locator('#accountsMenu').click();
   if (!await page.locator("#adminPanel").isVisible()) throw Error("管理员看不到成员与 Agent 管理");
-  await page.locator('#settings-ranking').click();
-  if (!await page.locator("#leaderboard .entry").count()) throw Error("协作积分没有渲染");
   await page.locator('#settings-guide').click();
+  await page.locator('#agentGuide .guide-current').waitFor();
   if (!await page.locator("#agentGuide .guide-current").count()) throw Error("工作指南没有渲染");
   if (await page.locator("#adminPanel").isVisible()) throw Error('工具模块没有分开显示');
   if (await page.locator("#taskList").isVisible()) throw Error("次要视图仍显示任务主面板");
@@ -157,10 +188,10 @@ async page => {
 
   // --- 手机宽度 ---
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const name of ["工作台", "任务", "成果", "交流"]) {
+  for (const name of ["工作台", "任务", "成果", "档案", "讨论区"]) {
     await page.locator(".primary-nav").getByRole("tab", { name }).click();
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error(`手机宽度下「${name}」出现横向溢出`);
   }
   await page.screenshot({ path: ".playwright-cli/board-shell-mobile.png", fullPage: true });
-  return { defaultFocus: "passed", outcomeEntry: "passed", textAndReport: "passed", quoteJump: "passed", secondaryViews: "passed", keyboard: "passed", mobile: "passed" };
+  return { defaultFocus: "passed", outcomeEntry: "passed", filesLibrary: "passed", textAndReport: "passed", quoteJump: "passed", secondaryViews: "passed", keyboard: "passed", mobile: "passed" };
 }

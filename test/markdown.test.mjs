@@ -156,3 +156,30 @@ test('source extraction understands named/reference links and ignores URLs insid
     {url: 'https://example.com/docs', label: '说明'},
   ]);
 });
+
+test('GitHub and Chinese callout blockquotes render styled titles safely while leaving normal quotes intact', () => {
+  const html = renderMarkdown([
+    '> [!WARNING] 价格口径存疑 :warning:',
+    '> 实际价差约为 **17%**，而非 20%。',
+    '',
+    '> [!结论] 条件支持小范围试点。',
+    '',
+    '> [!NOTE] <script>alert(1)</script>',
+    '>',
+    '> - 核对官方来源',
+    '',
+    '> [!UNKNOWN] 普通引用不会被改写',
+    '',
+    '> 原话摘录保持标准引用样式。',
+  ].join('\n'));
+  assert.match(html, /<blockquote class="markdown-callout markdown-callout-warning">/);
+  assert.match(html, /<p class="markdown-callout-title"><span class="markdown-callout-icon" aria-hidden="true">⚠️<\/span><span>价格口径存疑 ⚠️<\/span><\/p>/);
+  assert.match(html, /实际价差约为 <strong>17%<\/strong>/);
+  assert.match(html, /<blockquote class="markdown-callout markdown-callout-tip">/);
+  assert.match(html, /<span>结论<\/span><\/p>\n<p>条件支持小范围试点。<\/p>/);
+  assert.match(html, /<blockquote class="markdown-callout markdown-callout-note">/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script\b|\sstyle=/);
+  assert.match(html, /<blockquote>\n<p>\[!UNKNOWN\] 普通引用不会被改写<\/p>/);
+  assert.match(html, /<blockquote>\n<p>原话摘录保持标准引用样式。<\/p>/);
+});

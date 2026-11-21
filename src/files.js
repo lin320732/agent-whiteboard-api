@@ -1,4 +1,7 @@
 import { originAllowed, permit } from './auth.js';
+import { parsePublicFilePath } from './public-file-path.js';
+
+export { parsePublicFilePath };
 
 function randomToken(prefix) {
   const bytes = crypto.getRandomValues(new Uint8Array(18));
@@ -26,7 +29,8 @@ const fail = (message, status = 400) => { throw new FileError(message, status); 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-File-Name, X-File-Title, X-Task-Id',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, If-None-Match, Range, X-File-Name, X-File-Title, X-Task-Id',
+  'Access-Control-Expose-Headers': 'ETag, Accept-Ranges, Content-Range, Content-Length',
 };
 
 const json = (data, status = 200) => new Response(JSON.stringify({ ok: true, ...data }, null, 2), {
@@ -167,9 +171,27 @@ function parseScope(raw, hasTask) {
   return s;
 }
 
-export function buildFileUrl(requestUrl, id, filename) {
+const DEFAULT_PUBLIC_API_ORIGIN = 'https://agent-whiteboard-api.penzibdc.workers.dev';
+
+export function buildFilePath(id, filename) {
+  return `/api/files/${id}/${encodeURIComponent(filename)}`;
+}
+
+export function buildFileUrl(requestUrl, id, filename, env = null) {
   const u = new URL(requestUrl);
-  return `${u.origin}/api/files/${id}/${encodeURIComponent(filename)}`;
+  const origin = u.hostname === 'api.internal'
+    ? String(env?.PUBLIC_API_ORIGIN || DEFAULT_PUBLIC_API_ORIGIN).replace(/\/$/, '')
+    : u.origin;
+  return `${origin}${buildFilePath(id, filename)}`;
+}
+
+export function buildMarkdownEmbed(title, url, contentType) {
+  const label = String(title || '文件').replace(/[\[\]\r\n]/g, ' ').trim() || '文件';
+  const mime = baseMime(contentType);
+  if (mime.startsWith('image/')) return `![${label}](${url})`;
+  if (mime.startsWith('video/')) return `![video: ${label}](${url})`;
+  if (mime.startsWith('audio/')) return `![audio: ${label}](${url})`;
+  return `[${label}](${url})`;
 }
 
 export async function storeUploadedFile(env, principal, requestUrl, {
@@ -217,14 +239,20 @@ export async function storeUploadedFile(env, principal, requestUrl, {
     'INSERT INTO stored_files (id, r2_key, filename, title, content_type, size, uploader_id, task_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ).bind(id, r2Key, safeName, safeTitle, resolvedType, bytes.byteLength, principal.id, parsedTaskId, resolvedScope, createdAt).run();
 
-  const url = buildFileUrl(requestUrl, id, safeName);
+  const path = buildFilePath(id, safeName);
+  const url = buildFileUrl(requestUrl, id, safeName, env);
   return {
     id,
+    path,
     url,
+    raw_url: url,
+    json_url: `${url}?format=json`,
+    markdown_embed: buildMarkdownEmbed(safeTitle, url, resolvedType),
     filename: safeName,
     title: safeTitle,
     content_type: resolvedType,
     size: bytes.byteLength,
+    size_bytes: bytes.byteLength,
     task_id: parsedTaskId,
     scope: resolvedScope,
     created_at: createdAt,
@@ -303,89 +331,265 @@ async function parseUploadRequest(request, url, pathFilename = null) {
   };
 }
 
-async function serveFile(request, env, id, requestedName) {
-  if (!env.FILES) fail('R2 存储桶未配置（env.FILES）', 503);
-  const url = new URL(request.url);
-  let r2Key = requestedName ? `files/${id}/${requestedName}` : null;
-  let object = r2Key ? await env.FILES.get(r2Key) : null;
-  let row = null;
+function normalizeEtag(raw) {
+  const trimmed = String(raw || '').trim();
+  return trimmed.startsWith('W/') || trimmed.startsWith('w/') ? trimmed.slice(2).trim() : trimmed;
+}
 
-  if (!object) {
-    row = await env.DB.prepare('SELECT * FROM stored_files WHERE id=?').bind(id).first();
-    if (!row) fail('档案不存在或已删除', 404);
-    r2Key = row.r2_key;
-    object = await env.FILES.get(r2Key);
-    if (!object) fail('档案内容不存在', 404);
+function etagMatches(ifNoneMatch, currentEtag) {
+  if (!ifNoneMatch || !currentEtag) return false;
+  const target = normalizeEtag(currentEtag);
+  if (!target) return false;
+  for (const part of String(ifNoneMatch).split(',')) {
+    const token = part.trim();
+    if (!token) continue;
+    if (token === '*') return true;
+    if (normalizeEtag(token) === target) return true;
   }
+  return false;
+}
 
-  const contentType = object.httpMetadata?.contentType || row?.content_type || 'application/octet-stream';
-  const filename = object.customMetadata?.filename || row?.filename || requestedName || id;
-  const title = object.customMetadata?.title || row?.title || filename;
-  const mime = baseMime(contentType);
+function parseSingleRange(rangeHeader, totalSize) {
+  const match = /^\s*bytes\s*=\s*(.+?)\s*$/i.exec(String(rangeHeader || ''));
+  if (!match || match[1].includes(',')) return { kind: 'ignore' };
+  const spec = /^(\d*)-(\d*)$/.exec(match[1]);
+  if (!spec || (!spec[1] && !spec[2])) return { kind: 'ignore' };
+  if (!Number.isSafeInteger(totalSize) || totalSize <= 0) return { kind: 'unsatisfiable' };
+  const total = BigInt(totalSize);
+  if (!spec[1]) {
+    const suffix = BigInt(spec[2]);
+    if (suffix <= 0n) return { kind: 'unsatisfiable' };
+    const length = suffix >= total ? totalSize : Number(suffix);
+    return { kind: 'range', start: totalSize - length, end: totalSize - 1, length };
+  }
+  const startBig = BigInt(spec[1]);
+  if (startBig >= total) return { kind: 'unsatisfiable' };
+  const start = Number(startBig);
+  if (!spec[2]) {
+    return { kind: 'range', start, end: totalSize - 1, length: totalSize - start };
+  }
+  const endBig = BigInt(spec[2]);
+  if (endBig < startBig) return { kind: 'unsatisfiable' };
+  const end = endBig >= total ? totalSize - 1 : Number(endBig);
+  return { kind: 'range', start, end, length: end - start + 1 };
+}
 
+function errorResponse(e) {
+  return new Response(JSON.stringify({ ok: false, error: e.message }), {
+    status: e.status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+      ...CORS,
+    },
+  });
+}
+
+const MAX_REQUESTED_FILENAME_CHARS = 256;
+const MAX_REQUESTED_FILENAME_BYTES = 512;
+
+async function serveFile(request, env, id, requestedName, ensureDb = null) {
+  if (!env.FILES) fail('R2 存储桶未配置（env.FILES）', 503);
+  if (requestedName && (requestedName.length > MAX_REQUESTED_FILENAME_CHARS || new TextEncoder().encode(requestedName).byteLength > MAX_REQUESTED_FILENAME_BYTES)) {
+    fail('档案不存在或已删除', 404);
+  }
+  const url = new URL(request.url);
+
+  let rowLoaded = false;
+  let row = null;
+  const loadRow = async () => {
+    if (rowLoaded) return row;
+    rowLoaded = true;
+    if (!env.DB) return null;
+    if (ensureDb && !await ensureDb()) fail('D1 暫時不可用，請稍後再試', 503);
+    row = await env.DB.prepare('SELECT * FROM stored_files WHERE id=?').bind(id).first();
+    return row;
+  };
+
+  const fetchObject = async (key, mode) => {
+    if (mode === 'head') {
+      if (typeof env.FILES.head === 'function') return env.FILES.head(key);
+      const fallback = await env.FILES.get(key);
+      if (fallback && typeof fallback.body?.cancel === 'function') {
+        await fallback.body.cancel().catch(() => {});
+      }
+      return fallback;
+    }
+    return env.FILES.get(key);
+  };
+
+  const locateObject = async mode => {
+    let r2Key = requestedName ? `files/${id}/${requestedName}` : null;
+    let object = r2Key ? await fetchObject(r2Key, mode) : null;
+    if (!object) {
+      await loadRow();
+      if (!row) fail('档案不存在或已删除', 404);
+      if (requestedName && row.filename !== requestedName) fail('档案不存在或已删除', 404);
+      r2Key = row.r2_key;
+      object = await fetchObject(r2Key, mode);
+      if (!object) fail('档案内容不存在', 404);
+    }
+    return { r2Key, object };
+  };
+
+  // ?format=json stays uncached (no-store, no file ETag) and ignores Range so
+  // dashboard text previews and Agent JSON readers never receive 304/206 slices.
   if (url.searchParams.get('format') === 'json') {
-    if (!row) row = await env.DB.prepare('SELECT * FROM stored_files WHERE id=?').bind(id).first();
+    const { object } = await locateObject(request.method === 'HEAD' ? 'head' : 'get');
+    const meta = object.customMetadata || {};
+    const needsDbFallback = !meta.filename || !meta.title || !meta.scope || !meta.created_at;
+    if (needsDbFallback) await loadRow();
+
+    const contentType = object.httpMetadata?.contentType || row?.content_type || 'application/octet-stream';
+    const filename = meta.filename || row?.filename || requestedName || id;
+    const title = meta.title || row?.title || filename;
+    const taskId = row?.task_id ?? (meta.task_id ? Number(meta.task_id) : null);
+    const scope = meta.scope || row?.scope || 'general';
+    const createdAt = meta.created_at || row?.created_at || null;
     const isText = isTextContentType(contentType);
-    const textContent = isText && request.method === 'GET'
-      ? new TextDecoder().decode(await object.arrayBuffer())
-      : null;
-    return json({
+
+    let textContent = null;
+    if (request.method === 'GET') {
+      if (isText) {
+        textContent = new TextDecoder().decode(await object.arrayBuffer());
+      } else if (typeof object.body?.cancel === 'function') {
+        await object.body.cancel().catch(() => {});
+      }
+    }
+
+    const bodyText = JSON.stringify({
+      ok: true,
       file: {
         id,
-        url: buildFileUrl(request.url, id, filename),
+        path: buildFilePath(id, filename),
+        url: buildFileUrl(request.url, id, filename, env),
         filename,
         title,
         content_type: contentType,
         size: object.size ?? row?.size ?? 0,
-        task_id: row?.task_id ?? (object.customMetadata?.task_id ? Number(object.customMetadata.task_id) : null),
-        scope: row?.scope || object.customMetadata?.scope || 'general',
-        created_at: row?.created_at || object.customMetadata?.created_at || null,
+        task_id: taskId,
+        scope,
+        created_at: createdAt,
         ...(textContent != null ? { content: textContent } : {}),
       },
+    }, null, 2);
+    const headers = new Headers({
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-store',
+      ...CORS,
     });
+    if (request.method === 'GET' || !isText) {
+      headers.set('Content-Length', String(new TextEncoder().encode(bodyText).byteLength));
+    }
+    return new Response(request.method === 'HEAD' ? null : bodyText, { status: 200, headers });
   }
 
-  const headers = new Headers(CORS);
-  headers.set('Content-Type', contentType);
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-  if (object.httpEtag) headers.set('ETag', object.httpEtag);
-  if (Number.isFinite(object.size)) headers.set('Content-Length', String(object.size));
-
-  const download = url.searchParams.get('download') === '1';
-  const disposition = download ? 'attachment' : 'inline';
-  headers.set('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`);
-
-  if (mime === 'text/html') {
-    headers.set('Content-Security-Policy', REPORT_HTML_CSP);
+  const buildFileHeaders = (object, contentLength, rangeSpec = null, totalSize = object.size) => {
+    const contentType = object.httpMetadata?.contentType || row?.content_type || 'application/octet-stream';
+    const filename = object.customMetadata?.filename || row?.filename || requestedName || id;
+    const mime = baseMime(contentType);
+    const headers = new Headers(CORS);
+    headers.set('Content-Type', contentType);
+    headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Referrer-Policy', 'no-referrer');
-  } else if (mime === 'image/svg+xml') {
-    headers.set('Content-Security-Policy', SVG_CSP);
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    headers.set('Accept-Ranges', 'bytes');
+    if (object.httpEtag) headers.set('ETag', object.httpEtag);
+    if (Number.isFinite(contentLength)) headers.set('Content-Length', String(contentLength));
+    if (rangeSpec) headers.set('Content-Range', `bytes ${rangeSpec.start}-${rangeSpec.end}/${totalSize}`);
+
+    const download = url.searchParams.get('download') === '1';
+    const disposition = download ? 'attachment' : 'inline';
+    headers.set('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`);
+
+    if (mime === 'text/html') {
+      headers.set('Content-Security-Policy', REPORT_HTML_CSP);
+    } else if (mime === 'image/svg+xml') {
+      headers.set('Content-Security-Policy', SVG_CSP);
+    }
+    return headers;
+  };
+
+  const ifNoneMatch = request.headers.get('If-None-Match');
+  const rangeHeader = request.method === 'GET' ? request.headers.get('Range') : null;
+
+  if (request.method === 'HEAD' || ifNoneMatch || rangeHeader) {
+    const { r2Key, object: headObj } = await locateObject('head');
+
+    // RFC 9110 §14.2: conditional validators take precedence over Range.
+    if (ifNoneMatch && headObj.httpEtag && etagMatches(ifNoneMatch, headObj.httpEtag)) {
+      const headers = new Headers(CORS);
+      headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+      headers.set('Accept-Ranges', 'bytes');
+      headers.set('ETag', headObj.httpEtag);
+      return new Response(null, { status: 304, headers });
+    }
+
+    if (request.method === 'HEAD') {
+      return new Response(null, { status: 200, headers: buildFileHeaders(headObj, headObj.size) });
+    }
+
+    if (rangeHeader) {
+      const parsedRange = parseSingleRange(rangeHeader, headObj.size);
+      if (parsedRange.kind === 'unsatisfiable') {
+        const headers = new Headers(CORS);
+        headers.set('Cache-Control', 'no-store');
+        headers.set('Accept-Ranges', 'bytes');
+        headers.set('Content-Range', `bytes */${headObj.size}`);
+        if (headObj.httpEtag) headers.set('ETag', headObj.httpEtag);
+        return new Response(null, { status: 416, headers });
+      }
+      if (parsedRange.kind === 'range') {
+        const rangedObj = await env.FILES.get(r2Key, { range: { offset: parsedRange.start, length: parsedRange.length } });
+        if (!rangedObj) fail('档案内容不存在', 404);
+        const headers = buildFileHeaders(rangedObj, parsedRange.length, parsedRange, headObj.size);
+        if (!headers.get('ETag') && headObj.httpEtag) headers.set('ETag', headObj.httpEtag);
+        return new Response(rangedObj.body, { status: 206, headers });
+      }
+    }
+
+    const fullObj = await env.FILES.get(r2Key);
+    if (!fullObj) fail('档案内容不存在', 404);
+    return new Response(fullObj.body, { status: 200, headers: buildFileHeaders(fullObj, fullObj.size) });
   }
 
-  return new Response(request.method === 'HEAD' ? null : object.body, {
-    status: 200,
-    headers,
-  });
+  const { object } = await locateObject('get');
+  return new Response(object.body, { status: 200, headers: buildFileHeaders(object, object.size) });
+}
+
+// Fast path called before dbInit / principalFor / recordAgentVisit so
+// unauthenticated capability file reads incur 0 D1 reads/writes on R2 hit.
+export async function servePublicFileRequest(request, env, path, ensureDb = null) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+  const parsed = parsePublicFilePath(path);
+  if (!parsed) return null;
+  try {
+    if (parsed.invalidEncoding) fail('无效的文件名编码', 400);
+    return await serveFile(request, env, parsed.id, parsed.requestedName, ensureDb);
+  } catch (e) {
+    if (e instanceof FileError) return errorResponse(e);
+    throw e;
+  }
 }
 
 export async function filesRoute(request, env, principal, path) {
   const isRoot = path === '/api/files';
-  const itemMatch = path.match(/^\/api\/files\/(f_[A-Za-z0-9_-]{16,})(?:\/([^/]+))?$/);
-  const putNamedMatch = (request.method === 'PUT' || request.method === 'POST') && !itemMatch
+  const parsedPublic = parsePublicFilePath(path);
+  const putNamedMatch = (request.method === 'PUT' || request.method === 'POST') && !parsedPublic
     ? path.match(/^\/api\/files\/([^/]+)$/)
     : null;
 
-  if (!isRoot && !itemMatch && !putNamedMatch) return null;
+  if (!isRoot && !parsedPublic && !putNamedMatch) return null;
 
   try {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
 
     // Capability link read: unguessable f_<token> allows direct browser viewing, <img>/<video> tags, and Agent fetching.
-    if (itemMatch && (request.method === 'GET' || request.method === 'HEAD')) {
-      const id = itemMatch[1];
-      const requestedName = itemMatch[2] ? decodeURIComponent(itemMatch[2]) : null;
-      return await serveFile(request, env, id, requestedName);
+    if (parsedPublic && (request.method === 'GET' || request.method === 'HEAD')) {
+      if (parsedPublic.invalidEncoding) fail('无效的文件名编码', 400);
+      return await serveFile(request, env, parsedPublic.id, parsedPublic.requestedName);
     }
 
     if (!principal?.id) fail('请使用个人账号或独立 Agent 令牌', 401);
@@ -396,10 +600,11 @@ export async function filesRoute(request, env, principal, path) {
       const taskId = parseTaskId(url.searchParams.get('task_id') ?? url.searchParams.get('taskId'));
       const scope = url.searchParams.get('scope');
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
-      let sql = `SELECT f.*, COALESCE(l.display_name, p.name) AS uploader
+      let sql = `SELECT f.*, COALESCE(l.display_name, p.name) AS uploader, t.title AS task_title
         FROM stored_files f
         LEFT JOIN principals p ON p.id = f.uploader_id
         LEFT JOIN principal_labels l ON l.principal_id = p.id
+        LEFT JOIN tasks t ON t.id = f.task_id
         WHERE 1=1`;
       const args = [];
       if (taskId != null) { sql += ' AND f.task_id=?'; args.push(taskId); }
@@ -407,19 +612,29 @@ export async function filesRoute(request, env, principal, path) {
       sql += ' ORDER BY f.created_at DESC, f.rowid DESC LIMIT ?';
       args.push(limit);
       const { results } = await env.DB.prepare(sql).bind(...args).all();
-      const files = results.map(row => ({
-        id: row.id,
-        url: buildFileUrl(request.url, row.id, row.filename),
-        filename: row.filename,
-        title: row.title,
-        content_type: row.content_type,
-        size: row.size,
-        uploader_id: row.uploader_id,
-        uploader: row.uploader || '未知账号',
-        task_id: row.task_id,
-        scope: row.scope,
-        created_at: row.created_at,
-      }));
+      const files = results.map(row => {
+        const filePath = buildFilePath(row.id, row.filename);
+        const fileUrl = buildFileUrl(request.url, row.id, row.filename, env);
+        return {
+          id: row.id,
+          path: filePath,
+          url: fileUrl,
+          raw_url: fileUrl,
+          json_url: `${fileUrl}?format=json`,
+          markdown_embed: buildMarkdownEmbed(row.title || row.filename, fileUrl, row.content_type),
+          filename: row.filename,
+          title: row.title,
+          content_type: row.content_type,
+          size: row.size,
+          size_bytes: row.size,
+          uploader_id: row.uploader_id,
+          uploader: row.uploader || '未知账号',
+          task_id: row.task_id,
+          task_title: row.task_title || null,
+          scope: row.scope,
+          created_at: row.created_at,
+        };
+      });
       return json({ files });
     }
 
@@ -427,14 +642,18 @@ export async function filesRoute(request, env, principal, path) {
       const canUpload = principal.kind === 'agent' || permit(principal, 'task:create') || permit(principal, 'admin');
       if (!canUpload) fail('需要 Agent、发布者或管理员权限才能上传档案', 403);
       const url = new URL(request.url);
-      const named = putNamedMatch ? decodeURIComponent(putNamedMatch[1]) : null;
+      let named = null;
+      if (putNamedMatch) {
+        try { named = decodeURIComponent(putNamedMatch[1]); }
+        catch { fail('无效的文件名编码', 400); }
+      }
       const parsed = await parseUploadRequest(request, url, named);
       const file = await storeUploadedFile(env, principal, request.url, parsed);
       return json({ file, ...file }, 201);
     }
 
-    if (itemMatch && request.method === 'DELETE') {
-      const id = itemMatch[1];
+    if (parsedPublic && request.method === 'DELETE') {
+      const id = parsedPublic.id;
       const row = await env.DB.prepare('SELECT * FROM stored_files WHERE id=?').bind(id).first();
       if (!row) fail('档案不存在', 404);
       if (!permit(principal, 'admin') && row.uploader_id !== principal.id) {
@@ -447,12 +666,7 @@ export async function filesRoute(request, env, principal, path) {
 
     fail('不支持此方法', 405);
   } catch (e) {
-    if (e instanceof FileError) {
-      return new Response(JSON.stringify({ ok: false, error: e.message }), {
-        status: e.status,
-        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...CORS },
-      });
-    }
+    if (e instanceof FileError) return errorResponse(e);
     throw e;
   }
 }

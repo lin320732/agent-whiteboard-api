@@ -1,0 +1,12 @@
+{
+  "name": "agent-whiteboard-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:board": "node scripts/build-board.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

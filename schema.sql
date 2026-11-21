@@ -147,6 +147,19 @@ CREATE TABLE IF NOT EXISTS stored_files (id TEXT PRIMARY KEY, r2_key TEXT NOT NU
 CREATE INDEX IF NOT EXISTS stored_files_task ON stored_files(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS stored_files_uploader ON stored_files(uploader_id, created_at DESC);
 
+-- Agent 免费与永久额度上报：agent_quotas 存每位 Agent 最新状态，agent_quota_reports 保留近 30 天上报记录。
+CREATE TABLE IF NOT EXISTS agent_quotas (agent_id INTEGER PRIMARY KEY REFERENCES principals(id), unit TEXT NOT NULL DEFAULT 'tokens', free_remaining REAL, free_total REAL, free_percent REAL, permanent_remaining REAL, permanent_total REAL, permanent_percent REAL, overall_percent REAL, status_level TEXT NOT NULL DEFAULT 'none', basis TEXT NOT NULL DEFAULT 'none', payload_json TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', reported_at TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_quota_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER NOT NULL REFERENCES principals(id), unit TEXT NOT NULL DEFAULT 'tokens', free_remaining REAL, free_total REAL, free_percent REAL, permanent_remaining REAL, permanent_total REAL, permanent_percent REAL, overall_percent REAL, status_level TEXT NOT NULL DEFAULT 'none', basis TEXT NOT NULL DEFAULT 'none', payload_json TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', reported_at TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS agent_quota_reports_recent ON agent_quota_reports(agent_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS agent_quota_reports_expiry ON agent_quota_reports(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS agent_quota_reports_request ON agent_quota_reports(agent_id, json_extract(payload_json, '$.request_id'))
+WHERE CASE WHEN json_valid(payload_json) THEN json_type(payload_json, '$.request_id') = 'text' ELSE 0 END;
+
+-- 管理员对具体 Agent 下达的留言与指示；Agent 回馈完成后自动标记为 completed 并永久存档。
+CREATE TABLE IF NOT EXISTS agent_directives (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id INTEGER NOT NULL REFERENCES principals(id), author_id INTEGER NOT NULL REFERENCES principals(id), content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'completed')), result TEXT NOT NULL DEFAULT '', links TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, completed_at TEXT);
+CREATE INDEX IF NOT EXISTS agent_directives_agent_status ON agent_directives(agent_id, status, id DESC);
+CREATE INDEX IF NOT EXISTS agent_directives_created ON agent_directives(created_at DESC, id DESC);
+
 ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';
 
 -- v0.2.3 一次性數據修正（冪等，可重複跑）：任務 5「誰能給我寫描寫秋天的詩句」
@@ -154,3 +167,7 @@ ALTER TABLE tasks ADD COLUMN type TEXT DEFAULT 'research';
 -- 跑完 schema.sql 並部署 v0.2.3 後，任務 5 可直接在管理台核對通過。
 -- 只改 id=5 且尚未改過的任務；已是 creative 的不會再動。
 UPDATE tasks SET type='creative' WHERE id=5 AND (type IS NULL OR type='research');
+
+-- Successful mailbox fetches and per-directive receipts (migration 0018).
+CREATE TABLE IF NOT EXISTS agent_inbox_state (agent_id INTEGER PRIMARY KEY REFERENCES principals(id), last_inbox_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_directive_receipts (directive_id INTEGER PRIMARY KEY REFERENCES agent_directives(id) ON DELETE CASCADE, fetched_at TEXT NOT NULL);

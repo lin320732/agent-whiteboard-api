@@ -4,7 +4,7 @@ async page => {
     ...Array.from({ length: 14 }, (_, n) => ({ id: 8 + n, username: `agent-${n}`, name: `Agent ${n}`, role: "agent", active: 1 })),
   ];
   const users = [{ id: 1, username: "owner", name: "管理员", role: "admin", active: 1 }, { id: 3, username: "publisher", name: "发布者", role: "publisher", active: 1 }];
-  let rotateCalls = 0, revokeCalls = 0, humanRotateCalls = 0, renameCalls = 0, rejectRename = true, rejectRevoke = true, nativeDialogs = 0, channelReads = 0;
+  let rotateCalls = 0, revokeCalls = 0, humanRotateCalls = 0, renameCalls = 0, rejectRename = true, rejectRevoke = true, nativeDialogs = 0, channelReads = 0, taskReads = 0;
   page.on("dialog", dialog => { nativeDialogs++; dialog.dismiss(); });
   const json = (value, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(value) });
   await page.route("**/api/**", async route => {
@@ -12,7 +12,7 @@ async page => {
     const path = request.url().replace(/^https?:\/\/[^/]+/, "").split("?")[0];
     if (path === "/api/auth/me") return route.fulfill(json({ user: { id: 1, name: users[0].name, role: "admin" } }));
     if (path === "/api/channels") return route.fulfill(json({ channels: [{ id: 1, name: `频道 ${++channelReads}` }] }));
-    if (path === "/api/tasks") return route.fulfill(json({ tasks: [] }));
+    if (path === "/api/tasks") return route.fulfill(json({ tasks: ++taskReads > 1 ? [{ id: 100, title: `刷新后的任务 ${taskReads}`, status: 'open' }] : [], decisions: [] }));
     if (path === "/api/messages") return route.fulfill(json({ messages: [] }));
     if (path === "/api/leaderboard") return route.fulfill(json({ leaderboard: [] }));
     if (path === "/api/admin/users/3/rotate") {
@@ -50,9 +50,10 @@ async page => {
   if (await edit.locator('input[name="name"]').inputValue() !== "新 Muse") throw Error("改名表单没有预填现有名称");
   await edit.locator('input[name="name"]').fill("取消的名称");
   await page.locator('#refresh').click();
-  // 频道快捷筛选在「任务」视图里；这里用文字更新判断刷新已完成，不去切换视图。
-  await page.waitForFunction(() => document.querySelector("#channelList")?.textContent.includes("频道 2"));
-  await page.waitForTimeout(100);
+  // Refresh the task summary while retaining the member form and leaving the
+  // unopened discussion view unloaded.
+  await page.locator('#taskList').getByText('刷新后的任务 2', { exact: true }).waitFor({ state: 'attached' });
+  if (channelReads !== 0) throw Error('成员页刷新提前读取了讨论区频道');
   if (await edit.locator('input[name="name"]').inputValue() !== "取消的名称") throw Error("刷新清掉了尚未保存的名称");
   await edit.getByRole("button", { name: "取消" }).click();
   if (renameCalls || await agent.locator(".account-edit").count()) throw Error("取消改名仍调用了接口");
@@ -67,10 +68,9 @@ async page => {
   if (nativeDialogs) throw Error("轮换依赖浏览器原生确认框");
   if (!await agent.locator(".account-confirm").isVisible()) throw Error("轮换未在账号旁显示确认操作");
   if (rotateCalls !== 0) throw Error("尚未确认就轮换了令牌");
-  const nextRefresh = channelReads + 1;
+  const nextRefresh = taskReads + 1;
   await page.locator('#refresh').click();
-  await page.waitForFunction(expected => document.querySelector("#channelList")?.textContent.includes(expected), `频道 ${nextRefresh}`);
-  await page.waitForTimeout(100);
+  await page.locator('#taskList').getByText(`刷新后的任务 ${nextRefresh}`, { exact: true }).waitFor({ state: 'attached' });
   if (!await agent.locator(".account-confirm").isVisible()) throw Error("刷新数据时清掉了尚未确认的操作");
   await agent.getByRole("button", { name: "取消" }).click();
   if (await agent.locator(".account-confirm").count() || rotateCalls) throw Error("取消后仍执行了轮换");

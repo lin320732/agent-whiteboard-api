@@ -1,4 +1,5 @@
 node_modules/
+dist/
 .wrangler/
 .playwright-cli/
 .playwright-mcp/
@@ -9,3 +10,5 @@ skills/
 .admin-login.json
 .dev.vars
 .api-key.revoked-*
+__pycache__/
+*.pyc

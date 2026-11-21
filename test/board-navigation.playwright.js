@@ -63,8 +63,9 @@ async page => {
   const current = page.locator('#taskDetail .current-outcome');
   if (await current.locator('.outcome-links a[href="https://example.com/withdrawn-source"]').count()) throw Error('当前成果混入已移除的原始来源');
   if (await current.getByText('待独立核查', { exact: true }).count()) throw Error('未要求独立核查的报告被标为待核查');
-  await current.getByText('原始提交与来源', { exact: true }).click();
-  if (!await current.getByText('最初提交的材料', { exact: true }).isVisible()) throw Error('无法按需查看原始提交');
+  const detailHistory = page.locator('#detailPanel-outcome .version-history-section');
+  await detailHistory.getByText('原始提交与来源', { exact: true }).click();
+  if (!await detailHistory.getByText('最初提交的材料', { exact: true }).isVisible()) throw Error('无法按需查看原始提交');
 
   await page.locator('#statusFilter').selectOption('open');
   await page.waitForFunction(() => document.querySelectorAll('#taskList .task-item').length === 1);
@@ -72,9 +73,12 @@ async page => {
   await page.locator('#navOutcomes').click();
   await page.locator('#outcomeListReview .outcome-item').click();
   await page.locator('#outcomeDetail h3').filter({ hasText: tasks[0].title }).waitFor();
-  const history = page.locator('#outcomeDetail details').filter({ has: page.getByText('历史成果（1）', { exact: true }) });
-  await history.locator(':scope > summary').click();
-  if (!await history.locator('a[href="https://example.com/report-v1"]').isVisible()) throw Error('成果历史缺少对应版本的报告');
+  const history = page.locator('#outcomeDetail .version-history-section');
+  if (!await history.getByText('共 2 版 + 原始提交', { exact: true }).count()) throw Error('版本历史缺少清晰的版本总数标记');
+  if (!await history.locator('a[href="https://example.com/report-v1"]').isVisible()) throw Error('版本历史卡片缺少历史版本的直接打开按钮');
+  if (!await history.getByText('最初发布', { exact: true }).isVisible()) throw Error('版本历史未直接显示各版改动说明');
+  await history.getByText('查看第 1 版摘要与来源', { exact: true }).click();
+  if (!await history.getByText('第一版结论', { exact: true }).isVisible()) throw Error('无法展开查看历史版本摘要');
   await page.locator('#outcomeDetail').getByRole('button', { name: '打开任务详情' }).click();
   await title(tasks[0].title).waitFor();
   if (await page.locator('#statusFilter').inputValue()) throw Error('跨页打开任务没有清理冲突的筛选');
@@ -82,27 +86,22 @@ async page => {
   await title(tasks[0].title).waitFor();
   if (!await item(tasks[0].title).getAttribute('aria-pressed').then(value => value === 'true')) throw Error('刷新后从成果打开的任务失去选中状态');
 
-  await page.locator('#channelList').getByRole('button', { name: '待办频道', exact: true }).click();
+  await page.locator('#taskKindFilter').selectOption('web_report');
   await page.waitForFunction(() => document.querySelectorAll('#taskList .task-item').length === 1);
-  if (await page.locator('#taskDetail h3').count()) throw Error('切换频道后仍显示其他频道的详情');
-  await page.locator('#navOutcomes').click();
-  await page.locator('#outcomeListReview .outcome-item').click();
-  await page.locator('#outcomeDetail').getByRole('button', {name: '打开任务详情'}).click();
-  await title(tasks[0].title).waitFor();
-  const readsBeforeCommunity = messageScopes.length;
+  if (await page.locator('#taskDetail h3').count()) throw Error('切换类型筛选后仍显示旧详情');
+  await page.locator('#taskKindFilter').selectOption('');
   await page.locator('#navCommunity').click();
+  await page.locator('#channelList').getByRole('button', { name: /待办频道/ }).click();
+  await page.waitForFunction(() => document.querySelector('#messageScope').textContent === '待办频道');
+  if (messageScopes.at(-1) !== '2') throw Error('切换讨论频道未按频道读取留言');
+  await page.locator('#messageScopeAll').click();
   await page.waitForFunction(() => document.querySelector('#messageScope').textContent === '全部频道');
-  if (messageScopes.length <= readsBeforeCommunity || messageScopes.at(-1) !== '') throw Error('跨页清理筛选后，频道讨论仍保留旧范围');
+  if (messageScopes.at(-1) !== '') throw Error('返回全部频道未清空频道范围');
   await page.locator('#navTasks').click();
-  await page.locator('#channelList').getByRole('button', { name: '全部频道', exact: true }).click();
   await item(tasks[2].title).click();
   await title(tasks[2].title).waitFor();
   if (await page.locator('#taskDetail .current-outcome').getByText('旧版提交', { exact: true }).count()) throw Error('新安排下的文字交付被错误标为旧版提交');
 
-  await page.locator('#navCommunity').click();
-  await page.locator('#topicList').getByRole('button', { name: /值得继续的话题/ }).click();
-  await page.locator('#topicDetail h3').waitFor();
-  if (!await page.locator('#viewCommunity').isVisible()) throw Error('今日重点的话题没有打开交流视图');
   await page.locator('#navHome').click();
   await page.locator('#refresh').click();
   if (!await page.locator('#viewHome').isVisible()) throw Error('刷新后台详情抢走了当前视图');

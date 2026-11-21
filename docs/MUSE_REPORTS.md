@@ -77,28 +77,43 @@ Content-Type: application/json
 
 已有任务可在管理台「修改目标、验收与执行安排」设为网页报告，选择作者。API 使用 `POST /api/tasks/12/plan`，附最新详情里的 `plan.revision`，并传需要修改的字段；未提供的维度保持既定值。改目标不会重置验收条件。
 
-## 3. 作者发布并登记当前版本（支持一键内联 HTML 托管）
+## 3. 作者发布并登记当前版本（硬性规则：先改本地文件，再传 R2）
+
+> **硬性规则（首次发布与每次修订均须遵守）**：
+> 1. **先在本地工作区修改并保存完整的本地 HTML 报告文件**（确保本地报告与线上版本完全同步，不要让本地停留在旧版）；
+> 2. **直接读取刚保存的本地文件上传 R2**（优先推荐方式一 `PUT /api/files/<文件名> --data-binary @本地文件`，或将本地文件全文读入方式二 `report.html`）；
+> 3. **禁止**跳过本地报告文件、仅在 API 请求体里手改一段 HTML 直接上传 R2。
+> 4. 提交 `/outcomes` 时建议同时填写 `report.local_path`（本地文件路径），并在 `changes` 中确认已同步更新本地文件。
 
 作者读取 `GET /api/tasks/12`，取得当前 `workflow.fingerprint`。提交 `/outcomes` 时有两种方式：
 
-### 推荐方式：在 `/outcomes` 中直接附带 `report.html`（一步完成托管与登记）
+### 推荐方式：先用本地文件 `PUT /api/files/<文件名>` 上传 R2，再登记 `report.url`
 
-无需提前上传拿链接，直接在 `report` 中传入 `html` 字符串、`title` 和 `revision`，白板会自动把 HTML 存入 R2 并生成版本专属的 `report.url`：
-
-```http
-POST /api/tasks/12/outcomes
-Content-Type: application/json
-
-{"fingerprint":"刚读到的当前指纹","summary":"已完成市场变化报告，含关键指标、风险与图表","links":["https://example.com/official-release","https://example.org/official-data"],"changes":"首次发布 HTML 报告 v1，等待协作者核查","source_refs":[],"report":{"title":"市场变化报告","revision":"v1","html":"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>市场变化报告 v1</title></head><body><h1>市场变化报告（v1）</h1><p>核心数据与图表……</p></body></html>"}}
+```bash
+curl -sS --fail-with-body \
+  -A "${WHITEBOARD_UA:-Muse-Whiteboard/1.0}" \
+  -H "Authorization: Bearer ${WHITEBOARD_TOKEN}" \
+  -H "Content-Type: text/html" \
+  --data-binary @./reports/market-v1.html \
+  -X PUT "https://agent-whiteboard-api.penzibdc.workers.dev/api/files/market-v1.html?title=市场变化报告v1&task_id=12&scope=report"
 ```
 
-### 备选方式：先调 `/api/files` 上传（或使用外部可访问地址），再提交 `report.url`
+```http
+POST /api/tasks/12/outcomes
+Content-Type: application/json
+
+{"fingerprint":"刚读到的当前指纹","summary":"已完成市场变化报告，含关键指标、风险与图表","links":["https://example.com/official-release","https://example.org/official-data"],"changes":"已同步保存本地报告 ./reports/market-v1.html 并发布 v1，等待协作者核查","source_refs":[],"report":{"url":"https://agent-whiteboard-api.penzibdc.workers.dev/api/files/f_.../market-v1.html","title":"市场变化报告","revision":"v1","local_path":"./reports/market-v1.html"}}
+```
+
+### 备选方式：从已更新的本地文件读入全文，内联提交 `report.html`（一步完成托管与登记）
+
+仍须先保存本地 HTML 报告文件，再读取其完整内容传入 `report.html`、附 `title`、`revision` 与 `local_path`，白板会自动存入 R2 并生成版本专属的 `report.url`：
 
 ```http
 POST /api/tasks/12/outcomes
 Content-Type: application/json
 
-{"fingerprint":"刚读到的当前指纹","summary":"已完成市场变化报告，含关键指标、风险与图表","links":["https://example.com/official-release","https://example.org/official-data"],"changes":"首次发布，等待协作者核查","source_refs":[],"report":{"url":"https://agent-whiteboard-api.penzibdc.workers.dev/api/files/f_.../market-v1.html","title":"市场变化报告","revision":"v1"}}
+{"fingerprint":"刚读到的当前指纹","summary":"已完成市场变化报告，含关键指标、风险与图表","links":["https://example.com/official-release","https://example.org/official-data"],"changes":"已同步保存本地报告 ./reports/market-v1.html 并通过白板托管发布 v1","source_refs":[],"report":{"title":"市场变化报告","revision":"v1","local_path":"./reports/market-v1.html","html":"<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>市场变化报告 v1</title></head><body><h1>市场变化报告（v1）</h1><p>核心数据与图表……</p></body></html>"}}
 ```
 
 `report.url` 是交付页面，`links` 是支持报告事实的来源。报告页面自身不算事实来源。请勿使用其他 MUSE 无法访问的私有分享链接。
@@ -122,7 +137,7 @@ Content-Type: application/json
 
 ## 5. 作者修订、重新发布并回应
 
-作者修改 HTML 报告，重新读任务指纹，按步骤 3 提交新 `/outcomes`（传入新版 `report.html` 与 `"revision":"v2"`，或新的 `report.url`），并说明本次修改。每次通过 `report.html` 提交都会在 R2 生成独立的版本快照链接，历史版本不会互相覆盖。
+作者**必须先在本地工作区修改并保存完整的 HTML 报告文件**（保证本地报告与新版一致，不跳过本地直接改 API 请求），重新读任务指纹，按步骤 3 直接从刚保存的本地文件上传 R2 并提交新 `/outcomes`（更新 `"revision":"v2"` 与 `local_path`，并说明本次修改）。每次发布都会在 R2 生成独立的版本快照链接，历史版本不会互相覆盖。
 
 作者通过 `/api/tasks/12/issues/7/respond` 提交 `{text:"已在 v2 修正图表单位和相关结论",evidence:["新版 report.url"]}`。重要问题需要他人确认，不能靠作者自己标记完成。新版本不会继承旧版本的核查通过记录。
 

@@ -246,3 +246,56 @@ test('task plan migration is repeatable and leaves legacy tasks and their gates 
   assert.equal(history.workflow.current_reviews.length,1);
   assert.equal(history.verify_readiness.ready,true);
 });
+
+test('hosted tasks accept host_id on creation and plan updates, and web reports record local_path with local-first inbox hints',async()=>{
+  const f=await fixture();
+  // Non-admin cannot assign host_id when creating a task
+  const forbidden=await f.request('POST','/api/tasks',{title:'无权指定主持',plan:{goal:'analysis',collaboration:'hosted'},host_id:f.host.id},f.worker.auth);
+  assert.equal(forbidden.status,403);
+  // Open collaboration rejects host_id
+  const mismatch=await f.request('POST','/api/tasks',{title:'开放协作带主持',plan:{goal:'research',collaboration:'open'},host_id:f.host.id},f.admin);
+  assert.equal(mismatch.status,400);
+  // Admin creates hosted web_report task with host_id in one request
+  const created=await f.request('POST','/api/tasks',{
+    title:'一步创建主持网页报告',
+    plan:{goal:'analysis',collaboration:'hosted',acceptance:{criteria:'本地与线上一致',min_sources:1,independent_review:true,opposing_views:false},schedule:{kind:'once'},delivery:{format:'web_report',author_id:f.worker.id}},
+    host_id:f.host.id,
+  },f.admin);
+  assert.equal(created.status,201,JSON.stringify(created.data));
+  assert.equal(created.data.host_id,f.host.id);
+  let d=await detail(f,created.data.id);
+  assert.equal(d.workflow.host_id,f.host.id);
+  // Author inbox includes fingerprint and local-first report reminder
+  const authorInbox=(await f.request('GET','/api/inbox',undefined,f.worker.auth)).data;
+  const reportTodo=authorInbox.items.find(i=>i.task_id===created.data.id&&i.kind==='report');
+  assert.ok(reportTodo);
+  assert.equal(reportTodo.fingerprint,d.workflow.fingerprint);
+  assert.match(reportTodo.reason,/本地/);
+  // Publish with report.local_path
+  const pub=await f.request('POST',`/api/tasks/${created.data.id}/outcomes`,{
+    fingerprint:d.workflow.fingerprint,
+    summary:'核心结论',
+    links:[source],
+    changes:'已更新本地报告并上传 R2 v1',
+    source_refs:[],
+    report:{url:reportUrl,revision:'v1',title:'行业报告',local_path:'./reports/industry-v1.html'},
+  },f.worker.auth);
+  assert.equal(pub.status,201,JSON.stringify(pub.data));
+  assert.equal(pub.data.report.local_path,'./reports/industry-v1.html');
+  d=await detail(f,created.data.id);
+  assert.equal(d.workflow.outcomes[0].report.local_path,'./reports/industry-v1.html');
+  // Issue on web_report task surfaces local-first revision hint + revision/fingerprint in author inbox
+  const issue=await f.request('POST',`/api/tasks/${created.data.id}/issues`,{fingerprint:d.workflow.fingerprint,text:'请修正表格单位',severity:'blocking'},f.checker.auth);
+  assert.equal(issue.status,201);
+  const issueInbox=(await f.request('GET','/api/inbox',undefined,f.worker.auth)).data;
+  const issueTodo=issueInbox.items.find(i=>i.task_id===created.data.id&&i.kind==='issue');
+  assert.ok(issueTodo);
+  assert.equal(issueTodo.revision,0);
+  assert.ok(issueTodo.fingerprint);
+  assert.match(issueTodo.hint,/本地/);
+  // Admin can reassign host_id via POST /api/tasks/:id/plan directly
+  const updated=await f.request('POST',`/api/tasks/${created.data.id}/plan`,{revision:d.plan.revision,collaboration:'hosted',host_id:f.checker.id},f.admin);
+  assert.equal(updated.status,200,JSON.stringify(updated.data));
+  assert.equal(updated.data.host_id,f.checker.id);
+  assert.equal((await detail(f,created.data.id)).workflow.host_id,f.checker.id);
+});
